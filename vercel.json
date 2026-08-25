@@ -10,7 +10,7 @@
     { "source": "/oauth/token", "destination": "/api/oauth-token" }
   ],
   "functions": {
-    "api/server.ts": { "maxDuration": 60 },
+    "api/server.ts": { "maxDuration": 300 },
     "api/health.ts": { "maxDuration": 10 },
     "api/oauth-protected-resource.ts": { "maxDuration": 10 },
     "api/oauth-metadata.ts": { "maxDuration": 10 },
