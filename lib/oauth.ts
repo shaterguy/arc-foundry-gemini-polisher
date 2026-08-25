@@ -83,7 +83,7 @@ export interface OAuthBlobGetResult {
   statusCode: number;
   stream: ReadableStream<Uint8Array> | null;
   blob: {
-    size: number;
+    size: number | null;
     etag?: string;
   };
 }
@@ -287,7 +287,8 @@ export class BlobOAuthStore implements OAuthStateStore {
     try {
       const result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: this.tokenProvider() });
       if (!result) return { state: emptyOAuthState(), etag: null, exists: false };
-      if (result.statusCode !== 200 || !result.stream || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
+      if (result.statusCode !== 200 || !result.stream || typeof result.blob.size !== "number"
+        || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
       const text = await new Response(result.stream).text();
       const state = parseOAuthState(text);
       pruneState(state);
