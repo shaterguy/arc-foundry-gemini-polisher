@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm ci --omit=peer --no-audit --no-fund",
+  "rewrites": [
+    { "source": "/mcp", "destination": "/api/server" },
+    { "source": "/health", "destination": "/api/health" },
+    { "source": "/.well-known/oauth-protected-resource/mcp", "destination": "/api/oauth-protected-resource" },
+    { "source": "/.well-known/oauth-authorization-server", "destination": "/api/oauth-metadata" },
+    { "source": "/oauth/authorize", "destination": "/api/oauth-authorize" },
+    { "source": "/oauth/token", "destination": "/api/oauth-token" }
+  ],
+  "functions": {
+    "api/server.ts": { "maxDuration": 60 },
+    "api/health.ts": { "maxDuration": 10 },
+    "api/oauth-protected-resource.ts": { "maxDuration": 10 },
+    "api/oauth-metadata.ts": { "maxDuration": 10 },
+    "api/oauth-authorize.ts": { "maxDuration": 10 },
+    "api/oauth-token.ts": { "maxDuration": 10 }
+  }
+}

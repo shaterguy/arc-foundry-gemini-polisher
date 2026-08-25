@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - v0.1.0-dev1
+      - v0.1.0-dev2
+      - v0.1.0-dev3
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "npm"
+      - name: Install locked framework-free dependencies
+        run: npm ci --omit=peer --no-audit --no-fund
+      - name: Verify framework-free runtime install
+        run: |
+          for package in next react react-dom; do
+            if [ -d "node_modules/$package" ]; then
+              echo "Unexpected framework package installed: $package"
+              exit 1
+            fi
+          done
+      - name: Audit deployed dependency tree
+        run: npm audit --omit=peer --audit-level=high
+      - name: Typecheck Vercel Functions
+        run: npm run typecheck
+      - name: Compile and import production ESM runtime
+        run: npm run runtime-check
+      - name: Unit and route tests
+        run: npm test

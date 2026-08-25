@@ -1,0 +1,25 @@
+{
+  "name": "arc-foundry-gemini-polisher",
+  "version": "0.1.0-dev3",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "runtime-check": "tsc -p tsconfig.runtime.json && node -e \"import('./.runtime-check/api/server.js').then(() => console.log('runtime import ok')).catch((error) => { console.error(error); process.exit(1); })\"",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "@vercel/blob": "2.8.0",
+    "mcp-handler": "2.1.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3"
+  }
+}
