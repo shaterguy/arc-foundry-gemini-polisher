@@ -26,15 +26,16 @@ The server derives immutable line block IDs from `locked_text`. Blank lines and 
 
 ## Runtime and secrets
 
-Hosting target is Vercel only. Runtime entrypoints are framework-free Vercel Functions: `api/server.ts` for MCP and `api/health.ts` for health. `vercel.json` rewrites the public `/mcp` and `/health` paths to those functions. Next.js and React are not application dependencies.
+Hosting, OAuth endpoints, MCP runtime, and OAuth persistence are Vercel-only. Framework-free Vercel Functions expose `/mcp`, `/health`, RFC 9728 protected-resource metadata, OAuth authorization-server metadata, `/oauth/authorize`, and `/oauth/token`. Next.js and React are not application dependencies.
 
-`mcp-handler` declares Next.js as an optional peer for users who mount it in Next.js. This project does not use that integration. Vercel and CI both run `npm ci --omit=peer`, and CI explicitly fails if `next`, `react`, or `react-dom` appears in the installed runtime tree. Required MCP/Zod packages remain direct pinned dependencies.
+`mcp-handler` declares Next.js as an optional peer for users who mount it in Next.js. This project does not use that integration. Vercel and CI both run `npm ci --omit=peer`, and CI explicitly fails if `next`, `react`, or `react-dom` appears in the installed runtime tree. Required MCP/Zod packages and the Vercel Blob client remain exact pinned dependencies.
 
-The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. Both Gemini polish and semantic-validation requests use the server-side GenerateContent REST API with top-level `store: false`, overriding project-level logging for those requests.
+Manuscript processing is stateless. The only persistent application state is OAuth transactional metadata in a **Private Vercel Blob** object (`oauth/state-v1.json`). Authorization codes, access tokens, and refresh tokens are persisted only by SHA-256 hash with binding/expiry metadata; refresh tokens rotate and replay revokes the token family. Raw manuscript/candidate text, adjacent context, protected manifests, Gemini request/response content, owner credentials, and OAuth token plaintext are never written to Blob by application code. Raw manuscript/candidate text is not logged by application code. Gemini polish and semantic-validation requests use GenerateContent with `store: false`.
 
 Configure secrets only as Vercel environment variables:
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
-- `MCP_BEARER_TOKEN`
+- `OAUTH_OWNER_SECRET` — high-entropy owner credential used only on the authorization page
+- `BLOB_READ_WRITE_TOKEN` — credential for the private OAuth state Blob store
 
 Non-secret configuration:
 - `MCP_ALLOWED_ORIGINS` (comma-separated; default `https://chatgpt.com`)
@@ -43,7 +44,23 @@ Non-secret configuration:
 - `GEMINI_MAX_ATTEMPTS` (1-3, default 2)
 - `GEMINI_NETWORK_RETRIES` (0-2, default 1)
 
-The `/mcp` route fails closed with HTTP 503 if `MCP_BEARER_TOKEN` is absent. A browser `Origin`, when present, must be allowlisted. `/health` exposes only name/version/status.
+`MCP_BEARER_TOKEN` is not accepted by the OAuth candidate and must not be used as a fallback. Missing OAuth/Blob configuration fails closed. A browser `Origin`, when present, must be allowlisted. `/health` exposes only name/version/status.
+
+## ChatGPT OAuth flow
+
+The canonical protected resource is `https://arc-foundry-gemini-polisher.vercel.app/mcp` with scope `polish:invoke`.
+
+The server is deliberately narrow rather than a general-purpose identity provider:
+- ChatGPT CIMD client identification only; no dynamic client-registration endpoint.
+- Only `https://chatgpt.com/oauth/.../client.json` client IDs are fetched, with redirects disabled and strict response limits.
+- Redirect URIs must be both present in the CIMD document and match the exact ChatGPT connector OAuth callback form.
+- Authorization Code + PKCE `S256` only; token endpoint client authentication is `none` for the public ChatGPT client.
+- Authorization codes are short-lived and single-use.
+- Access tokens are short-lived and bound to client/resource/scope.
+- Refresh tokens rotate; replay revokes the family, with a fixed maximum family lifetime.
+- OAuth state updates use bounded optimistic-concurrency writes and fail closed on storage corruption or exhausted conflicts.
+
+The owner authorization page contains no external script or asset and uses restrictive no-cache, referrer, framing, and CSP headers. OAuth secrets/tokens and Authorization headers must not be written to application logs.
 
 ## Development
 
@@ -51,11 +68,14 @@ The `/mcp` route fails closed with HTTP 503 if `MCP_BEARER_TOKEN` is absent. A b
 npm ci --omit=peer
 npm audit --omit=peer --audit-level=high
 npm run typecheck
+npm run runtime-check
 npm test
 ```
 
-CI performs these checks on the development branch and verifies that Next.js/React are absent from the installed runtime tree. No real Gemini key is required for unit tests; provider calls are mocked. Actual Vercel Functions packaging/build and live endpoint checks are performed in the deployment verification stage rather than by introducing a Vercel CLI dependency into the application tree.
+CI performs the same checks on the development branch and verifies that Next.js/React are absent from the installed runtime tree. No real Gemini key, owner secret, or Blob credential is required for unit tests; provider and state-store behavior are tested without real credentials. Actual Vercel Functions packaging, OAuth discovery, ChatGPT linking, and live endpoint behavior are deployment-stage gates.
 
 ## ChatGPT compatibility
 
-The MCP tool is annotated read-only and non-destructive because it transforms caller-provided text and has no external write side effect. Actual ChatGPT custom-app availability and authentication compatibility are product-plan dependent and must be verified against the deployed endpoint before Arc Foundry treats the integration as operational.
+The MCP tool is read-only and non-destructive because it transforms caller-provided text and has no external write side effect. Tool metadata advertises OAuth scope `polish:invoke`; the resource server independently validates access-token resource, scope, expiry, client, and refresh-family status before MCP execution.
+
+Operational compatibility is not assumed from unit tests alone. Release verification must connect the deployed endpoint through ChatGPT OAuth, complete tool discovery/Scan Tools, invoke `polish_korean_novel_final`, and confirm both successful Gemini polishing and exact locked-source fallback behavior before Arc Foundry treats the integration as operational.
