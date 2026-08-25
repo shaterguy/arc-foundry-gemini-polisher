@@ -42,6 +42,18 @@ function protectedTermsOrNull(input: PolishInput): string[] | null {
   return terms;
 }
 
+function providerFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (/^gemini_http_[1-5][0-9]{2}$/u.test(message)) return message;
+  if ([
+    "provider_empty_response",
+    "provider_invalid_json",
+    "provider_invalid_polish_payload",
+    "provider_invalid_validation_payload",
+  ].includes(message)) return message;
+  return "provider_error";
+}
+
 export async function polishLockedText(
   input: PolishInput,
   provider?: PolishProvider,
@@ -81,7 +93,7 @@ export async function polishLockedText(
     } catch (error) {
       const message = error instanceof Error && error.message.startsWith("block_manifest_")
         ? `scene_order: ${error.message}`
-        : "Gemini polish request failed";
+        : `Gemini polish request failed: ${providerFailureCode(error)}`;
       if (message.startsWith("scene_order:")) {
         latestViolations = [message];
         rejectionNotes = latestViolations;
@@ -101,8 +113,17 @@ export async function polishLockedText(
     let semantic;
     try {
       semantic = await activeProvider.validate(input.locked_text, candidate, protectedTerms);
-    } catch {
-      return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, true, false, ["Gemini validation request failed"]);
+    } catch (error) {
+      return fallback(
+        input,
+        "provider_failure",
+        activeProvider.model,
+        activeProvider.validatorModel,
+        attempt,
+        true,
+        false,
+        [`Gemini validation request failed: ${providerFailureCode(error)}`],
+      );
     }
 
     semanticPassed = semantic.preserved && semantic.violations.length === 0;
