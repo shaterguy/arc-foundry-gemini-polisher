@@ -1,5 +1,6 @@
 import {
   OAUTH_CSRF_COOKIE,
+  OAuthProtocolError,
   OWNER_ATTEMPT_LIMIT,
   clearCsrfCookie,
   constantTimeEqual,
@@ -35,7 +36,7 @@ export async function POST(request: Request): Promise<Response> {
     const csrfCookie = parseCookie(request, OAUTH_CSRF_COOKIE) ?? "";
     const csrfForm = form.get("csrf") ?? "";
     if (!csrfCookie || !csrfForm || !constantTimeEqual(csrfCookie, csrfForm)) {
-      return oauthErrorResponse(new Error("csrf"));
+      return oauthErrorResponse(new OAuthProtocolError("invalid_request"));
     }
     const priorFailures = await getOwnerFailureCount(defaultOAuthStore, authorization);
     if (priorFailures >= OWNER_ATTEMPT_LIMIT) {

@@ -17,7 +17,7 @@ test("framework-free health function returns only safe service metadata", async 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     name: "arc-foundry-gemini-polisher",
-    version: "0.1.0-dev3",
+    version: "0.1.0-dev4",
     status: "ok",
   });
 });
