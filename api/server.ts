@@ -1,8 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { polishLockedText } from "../lib/polisher";
-import { PROTECTED_MANIFEST_SOURCE } from "../lib/types";
+import { polishLockedText } from "../lib/polisher.js";
+import { PROTECTED_MANIFEST_SOURCE } from "../lib/types.js";
 
 const inputSchema = z.object({
   locked_text: z.string().min(1).max(120_000).describe("Exact FINAL CONTENT LOCK text to polish"),

@@ -1,6 +1,6 @@
-import { buildLockedLayout } from "./blocks";
-import type { PolishInput, PolishedBlock, SemanticValidation, ViolationCategory } from "./types";
-import { VIOLATION_CATEGORIES } from "./types";
+import { buildLockedLayout } from "./blocks.js";
+import type { PolishInput, PolishedBlock, SemanticValidation, ViolationCategory } from "./types.js";
+import { VIOLATION_CATEGORIES } from "./types.js";
 
 const DEFAULT_MODEL = "gemini-3.7-flash";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";

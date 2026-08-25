@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "outDir": ".runtime-check",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["api/**/*.ts", "lib/**/*.ts"],
+  "exclude": ["node_modules", "test/**/*.ts", ".runtime-check"]
+}

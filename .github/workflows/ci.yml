@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - v0.1.0-dev1
+      - v0.1.0-dev2
   pull_request:
 
 permissions:
@@ -35,5 +36,7 @@ jobs:
         run: npm audit --omit=peer --audit-level=high
       - name: Typecheck Vercel Functions
         run: npm run typecheck
+      - name: Compile and import production ESM runtime
+        run: npm run runtime-check
       - name: Unit and route tests
         run: npm test

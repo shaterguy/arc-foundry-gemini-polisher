@@ -1,7 +1,7 @@
-import { buildLockedLayout, reconstructCandidate } from "./blocks";
-import { createGeminiProvider, getMaxPolishAttempts, getRuntimeModels, type PolishProvider } from "./gemini";
-import { sha256, validateDeterministic } from "./preservation";
-import { PROTECTED_MANIFEST_SOURCE, type PolishInput, type PolishResult } from "./types";
+import { buildLockedLayout, reconstructCandidate } from "./blocks.js";
+import { createGeminiProvider, getMaxPolishAttempts, getRuntimeModels, type PolishProvider } from "./gemini.js";
+import { sha256, validateDeterministic } from "./preservation.js";
+import { PROTECTED_MANIFEST_SOURCE, type PolishInput, type PolishResult } from "./types.js";
 
 export interface PolishOptions {
   maxAttempts?: number;

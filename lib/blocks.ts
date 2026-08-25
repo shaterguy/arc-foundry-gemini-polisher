@@ -1,4 +1,4 @@
-import type { EditableBlock, PolishedBlock } from "./types";
+import type { EditableBlock, PolishedBlock } from "./types.js";
 
 const SCENE_SEPARATOR_RE = /^[\s]*(?:\*{3,}|-{3,}|_{3,}|#{3,}|[◆◇◈※]+)[\s]*$/u;
 

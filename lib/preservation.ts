@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isSceneSeparator } from "./blocks";
+import { isSceneSeparator } from "./blocks.js";
 
 const NUMERIC_TOKEN_RE = /(?:\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}:\d{2}(?::\d{2})?|[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:\s?(?:%|퍼센트|원|만원|억원|조원|년|개월|월|일|시|분|초|명|개|회|층|km|m|cm|mm|kg|g|℃|°C))?)/gu;
 const DIALOGUE_LINE_RE = /^[\s]*["“‘'「『].+["”’'」』][.!?…~]*[\s]*$/u;
