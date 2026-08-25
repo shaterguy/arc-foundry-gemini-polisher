@@ -8,6 +8,7 @@ on:
       - v0.1.0-dev3
       - v0.1.0-dev4
       - v0.1.0-dev5
+      - v0.1.0-dev6
   pull_request:
 
 permissions:
