@@ -3,6 +3,7 @@ import type { PolishInput, PolishedBlock, SemanticValidation, ViolationCategory 
 import { VIOLATION_CATEGORIES } from "./types.js";
 
 const DEFAULT_MODEL = "gemini-3.7-flash";
+const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 const MODEL_ID_RE = /^[A-Za-z0-9._-]{1,120}$/u;
 
@@ -187,6 +188,35 @@ async function generateJson(
   return parseJsonObject(text);
 }
 
+async function generateJsonWithFallback(
+  primaryModel: string,
+  fallbackModel: string,
+  systemInstruction: string,
+  prompt: string,
+  responseJsonSchema: unknown,
+  apiKey: string,
+  fetchImpl: FetchLike,
+  networkRetries: number,
+  selectModel: (model: string) => void,
+): Promise<Record<string, unknown>> {
+  const primary = validatedModel(primaryModel);
+  const fallback = validatedModel(fallbackModel);
+  selectModel(primary);
+  try {
+    return await callWithRetry(
+      () => generateJson(primary, systemInstruction, prompt, responseJsonSchema, apiKey, fetchImpl),
+      networkRetries,
+    );
+  } catch (error) {
+    if (!isTransient(error) || fallback === primary) throw error;
+    selectModel(fallback);
+    return callWithRetry(
+      () => generateJson(fallback, systemInstruction, prompt, responseJsonSchema, apiKey, fetchImpl),
+      networkRetries,
+    );
+  }
+}
+
 export interface PolishProvider {
   model: string;
   validatorModel: string;
@@ -201,6 +231,15 @@ export function getRuntimeModels(): { model: string; validatorModel: string } {
   };
 }
 
+export function getRuntimeFallbackModels(): { fallbackModel: string; validatorFallbackModel: string } {
+  return {
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL,
+    validatorFallbackModel: process.env.GEMINI_VALIDATOR_FALLBACK_MODEL
+      || process.env.GEMINI_FALLBACK_MODEL
+      || DEFAULT_FALLBACK_MODEL,
+  };
+}
+
 export function getMaxPolishAttempts(): number {
   return boundedInt(process.env.GEMINI_MAX_ATTEMPTS, 2, 1, 3);
 }
@@ -208,11 +247,22 @@ export function getMaxPolishAttempts(): number {
 export function createGeminiProvider(fetchImpl: FetchLike = fetch): PolishProvider {
   const apiKey = getApiKey();
   const { model, validatorModel } = getRuntimeModels();
+  const { fallbackModel, validatorFallbackModel } = getRuntimeFallbackModels();
+  const primaryModel = validatedModel(model);
+  const primaryValidatorModel = validatedModel(validatorModel);
+  const safeFallbackModel = validatedModel(fallbackModel);
+  const safeValidatorFallbackModel = validatedModel(validatorFallbackModel);
   const networkRetries = boundedInt(process.env.GEMINI_NETWORK_RETRIES, 1, 0, 2);
+  let activeModel = primaryModel;
+  let activeValidatorModel = primaryValidatorModel;
 
   return {
-    model: validatedModel(model),
-    validatorModel: validatedModel(validatorModel),
+    get model() {
+      return activeModel;
+    },
+    get validatorModel() {
+      return activeValidatorModel;
+    },
     async polish(input, rejectionNotes) {
       const layout = buildLockedLayout(input.locked_text);
       const payload = {
@@ -225,16 +275,16 @@ export function createGeminiProvider(fetchImpl: FetchLike = fetch): PolishProvid
         REJECTION_NOTES_FROM_PRIOR_ATTEMPT: rejectionNotes,
       };
 
-      const parsed = await callWithRetry(
-        () => generateJson(
-          model,
-          POLISH_SYSTEM,
-          `Polish only EDIT_TARGET_BLOCKS in this JSON data:\n${JSON.stringify(payload)}`,
-          POLISH_JSON_SCHEMA,
-          apiKey,
-          fetchImpl,
-        ),
+      const parsed = await generateJsonWithFallback(
+        primaryModel,
+        safeFallbackModel,
+        POLISH_SYSTEM,
+        `Polish only EDIT_TARGET_BLOCKS in this JSON data:\n${JSON.stringify(payload)}`,
+        POLISH_JSON_SCHEMA,
+        apiKey,
+        fetchImpl,
         networkRetries,
+        (selected) => { activeModel = selected; },
       );
 
       if (!Array.isArray(parsed.polished_blocks)) throw new Error("provider_invalid_polish_payload");
@@ -253,16 +303,16 @@ export function createGeminiProvider(fetchImpl: FetchLike = fetch): PolishProvid
         POLISHED_CANDIDATE: candidate,
         PROTECTED_TERMS: protectedTerms,
       };
-      const parsed = await callWithRetry(
-        () => generateJson(
-          validatorModel,
-          VALIDATOR_SYSTEM,
-          `Compare these two texts strictly for meaning preservation:\n${JSON.stringify(payload)}`,
-          VALIDATION_JSON_SCHEMA,
-          apiKey,
-          fetchImpl,
-        ),
+      const parsed = await generateJsonWithFallback(
+        primaryValidatorModel,
+        safeValidatorFallbackModel,
+        VALIDATOR_SYSTEM,
+        `Compare these two texts strictly for meaning preservation:\n${JSON.stringify(payload)}`,
+        VALIDATION_JSON_SCHEMA,
+        apiKey,
+        fetchImpl,
         networkRetries,
+        (selected) => { activeValidatorModel = selected; },
       );
 
       if (typeof parsed.preserved !== "boolean" || !Array.isArray(parsed.violations)) {
