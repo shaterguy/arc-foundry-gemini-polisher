@@ -1,6 +1,15 @@
-import { timingSafeEqual } from "node:crypto";
-import { createMcpHandler } from "mcp-handler";
+import type { AuthInfo } from "@modelcontextprotocol/server";
+import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { z } from "zod";
+import {
+  OAUTH_ORIGIN,
+  OAUTH_RESOURCE,
+  OAUTH_RESOURCE_METADATA_PATH,
+  OAUTH_SCOPE,
+  defaultOAuthStore,
+  oauthRuntimeConfigured,
+  verifyAccessToken,
+} from "../lib/oauth.js";
 import { polishLockedText } from "../lib/polisher.js";
 import { PROTECTED_MANIFEST_SOURCE } from "../lib/types.js";
 
@@ -39,6 +48,7 @@ const mcpHandler = createMcpHandler((server) => {
       description: "Surface-level Korean novel copyediting after FINAL CONTENT LOCK. Never changes narrative authority; rejected or failed candidates fall back to the exact locked source.",
       inputSchema,
       outputSchema,
+      securitySchemes: [{ type: "oauth2", scopes: [OAUTH_SCOPE] }],
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -64,15 +74,22 @@ const mcpHandler = createMcpHandler((server) => {
     },
   );
 }, {
-  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev1" },
+  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev3" },
   verboseLogs: false,
 });
 
-function constantTimeEqual(actual: string, expected: string): boolean {
-  const actualBuffer = Buffer.from(actual, "utf8");
-  const expectedBuffer = Buffer.from(expected, "utf8");
-  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
-}
+const requestAuth = new WeakMap<Request, AuthInfo | undefined>();
+
+const authHandler = withMcpAuth(
+  mcpHandler,
+  async (request) => requestAuth.get(request),
+  {
+    required: true,
+    requiredScopes: [OAUTH_SCOPE],
+    resourceMetadataPath: OAUTH_RESOURCE_METADATA_PATH,
+    resourceUrl: OAUTH_ORIGIN,
+  },
+);
 
 function allowedOrigin(request: Request): boolean {
   const origin = request.headers.get("origin");
@@ -84,25 +101,36 @@ function allowedOrigin(request: Request): boolean {
   return allowed.includes(origin);
 }
 
-function unauthorized(): Response {
-  return Response.json(
-    { error: "unauthorized" },
-    { status: 401, headers: { "WWW-Authenticate": "Bearer realm=\"arc-foundry-gemini-polisher\"" } },
-  );
+function bearerToken(request: Request): string | undefined {
+  const authorization = request.headers.get("authorization") ?? "";
+  const [type, token] = authorization.split(" ");
+  return type?.toLowerCase() === "bearer" && token ? token : undefined;
 }
 
 async function guardedHandler(request: Request): Promise<Response> {
   if (!allowedOrigin(request)) return Response.json({ error: "origin_not_allowed" }, { status: 403 });
+  if (!oauthRuntimeConfigured()) return Response.json({ error: "oauth_not_configured" }, { status: 503 });
 
-  const expectedToken = process.env.MCP_BEARER_TOKEN;
-  if (!expectedToken) return Response.json({ error: "mcp_auth_not_configured" }, { status: 503 });
-
-  const authorization = request.headers.get("authorization") ?? "";
-  if (!authorization.startsWith("Bearer ")) return unauthorized();
-  const actualToken = authorization.slice("Bearer ".length);
-  if (!constantTimeEqual(actualToken, expectedToken)) return unauthorized();
-
-  return mcpHandler(request);
+  const token = bearerToken(request);
+  let authInfo: AuthInfo | undefined;
+  if (token) {
+    try {
+      const record = await verifyAccessToken(defaultOAuthStore, token);
+      if (record) {
+        authInfo = {
+          token,
+          clientId: record.clientId,
+          scopes: record.scopes,
+          expiresAt: Math.floor(record.expiresAt / 1000),
+          extra: { subject: record.subject, resource: OAUTH_RESOURCE },
+        };
+      }
+    } catch {
+      return Response.json({ error: "oauth_store_unavailable" }, { status: 503 });
+    }
+  }
+  requestAuth.set(request, authInfo);
+  return authHandler(request);
 }
 
 export { guardedHandler as GET, guardedHandler as POST };
