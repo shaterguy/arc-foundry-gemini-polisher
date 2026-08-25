@@ -24,7 +24,7 @@ Important inputs:
 
 ## Runtime and secrets
 
-Hosting target is Vercel only. The implementation is stateless and has no database, Blob/KV storage, Gemini File API, or cached-content dependency. Raw manuscript/candidate text is not logged by application code. Gemini `generateContent` calls explicitly set `store: false`.
+Hosting target is Vercel only. The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. It uses Gemini `generateContent`, which is the non-persistent request path rather than the stored Interactions API.
 
 Configure secrets only as Vercel environment variables:
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
