@@ -1,6 +1,6 @@
 {
   "name": "arc-foundry-gemini-polisher",
-  "version": "0.1.0-dev4",
+  "version": "0.1.0-dev5",
   "private": false,
   "type": "module",
   "scripts": {
