@@ -26,7 +26,9 @@ The server derives immutable line block IDs from `locked_text`. Blank lines and 
 
 ## Runtime and secrets
 
-Hosting target is Vercel only. Runtime entrypoints are framework-free Vercel Functions: `api/server.ts` for MCP and `api/health.ts` for health. `vercel.json` rewrites the public `/mcp` and `/health` paths to those functions. Next.js and React are not runtime dependencies.
+Hosting target is Vercel only. Runtime entrypoints are framework-free Vercel Functions: `api/server.ts` for MCP and `api/health.ts` for health. `vercel.json` rewrites the public `/mcp` and `/health` paths to those functions. Next.js and React are not application dependencies.
+
+`mcp-handler` declares Next.js as an optional peer for users who mount it in Next.js. This project does not use that integration. Vercel and CI both run `npm ci --omit=peer`, and CI explicitly fails if `next`, `react`, or `react-dom` appears in the installed runtime tree. Required MCP/Zod packages remain direct pinned dependencies.
 
 The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. Both Gemini polish and semantic-validation requests use the server-side GenerateContent REST API with top-level `store: false`, overriding project-level logging for those requests.
 
@@ -46,13 +48,13 @@ The `/mcp` route fails closed with HTTP 503 if `MCP_BEARER_TOKEN` is absent. A b
 ## Development
 
 ```bash
-npm ci
-npm audit --audit-level=high
+npm ci --omit=peer
+npm audit --omit=peer --audit-level=high
 npm run typecheck
 npm test
 ```
 
-CI performs these checks on the development branch. No real Gemini key is required for unit tests; provider calls are mocked. The actual Vercel Functions packaging/build and live endpoint checks are performed in the deployment verification stage rather than by introducing a Vercel CLI dependency into the application tree.
+CI performs these checks on the development branch and verifies that Next.js/React are absent from the installed runtime tree. No real Gemini key is required for unit tests; provider calls are mocked. Actual Vercel Functions packaging/build and live endpoint checks are performed in the deployment verification stage rather than by introducing a Vercel CLI dependency into the application tree.
 
 ## ChatGPT compatibility
 

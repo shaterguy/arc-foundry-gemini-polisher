@@ -21,8 +21,8 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-      - name: Install locked dependencies
-        run: npm ci --no-audit --no-fund
+      - name: Install locked framework-free dependencies
+        run: npm ci --omit=peer --no-audit --no-fund
       - name: Verify framework-free runtime install
         run: |
           for package in next react react-dom; do
@@ -31,8 +31,8 @@ jobs:
               exit 1
             fi
           done
-      - name: Audit locked dependency tree
-        run: npm audit --audit-level=high
+      - name: Audit deployed dependency tree
+        run: npm audit --omit=peer --audit-level=high
       - name: Typecheck Vercel Functions
         run: npm run typecheck
       - name: Unit and route tests

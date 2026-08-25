@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm ci --omit=peer --no-audit --no-fund",
   "rewrites": [
     { "source": "/mcp", "destination": "/api/server" },
     { "source": "/health", "destination": "/api/health" }
