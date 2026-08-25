@@ -74,7 +74,7 @@ const mcpHandler = createMcpHandler((server) => {
     },
   );
 }, {
-  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev3" },
+  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev5" },
   verboseLogs: false,
 });
 
