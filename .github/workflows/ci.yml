@@ -23,11 +23,17 @@ jobs:
           cache: "npm"
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
+      - name: Verify framework-free runtime install
+        run: |
+          for package in next react react-dom; do
+            if [ -d "node_modules/$package" ]; then
+              echo "Unexpected framework package installed: $package"
+              exit 1
+            fi
+          done
       - name: Audit locked dependency tree
         run: npm audit --audit-level=high
-      - name: Typecheck
+      - name: Typecheck Vercel Functions
         run: npm run typecheck
-      - name: Unit tests
+      - name: Unit and route tests
         run: npm test
-      - name: Production build
-        run: npm run build
