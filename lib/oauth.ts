@@ -756,7 +756,7 @@ export function renderAuthorizationPage(request: AuthorizationRequest, csrf: str
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "content-security-policy": "default-src 'none'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'",
       "set-cookie": `${OAUTH_CSRF_COOKIE}=${encodeURIComponent(csrf)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=300`,
     },
   });
