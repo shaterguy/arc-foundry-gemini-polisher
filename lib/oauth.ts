@@ -439,6 +439,12 @@ export async function exchangeAuthorizationCode(
   };
 }
 
+type RefreshOutcome =
+  | { kind: "invalid" }
+  | { kind: "replay" }
+  | { kind: "scope" }
+  | { kind: "ok"; scopes: string[] };
+
 export async function rotateRefreshToken(
   store: OAuthStateStore,
   form: URLSearchParams,
@@ -454,7 +460,7 @@ export async function rotateRefreshToken(
   const oldKey = hashOpaque(refreshToken);
   const newAccessToken = randomOpaqueToken();
   const newRefreshToken = randomOpaqueToken();
-  const outcome = await store.transact((state) => {
+  const outcome = await store.transact<RefreshOutcome>((state) => {
     const record = state.refreshTokens[oldKey];
     if (!record || record.clientId !== clientId || record.resource !== resource || record.expiresAt <= now) {
       return { value: { kind: "invalid" as const }, commit: false };

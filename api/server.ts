@@ -48,7 +48,7 @@ const mcpHandler = createMcpHandler((server) => {
       description: "Surface-level Korean novel copyediting after FINAL CONTENT LOCK. Never changes narrative authority; rejected or failed candidates fall back to the exact locked source.",
       inputSchema,
       outputSchema,
-      securitySchemes: [{ type: "oauth2", scopes: [OAUTH_SCOPE] }],
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [OAUTH_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
