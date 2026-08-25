@@ -1,5 +1,3 @@
-export const runtime = "nodejs";
-
 export function GET(): Response {
   return Response.json({
     name: "arc-foundry-gemini-polisher",

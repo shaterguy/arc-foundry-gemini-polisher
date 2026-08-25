@@ -26,7 +26,9 @@ The server derives immutable line block IDs from `locked_text`. Blank lines and 
 
 ## Runtime and secrets
 
-Hosting target is Vercel only. The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. Both Gemini polish and semantic-validation requests use the server-side GenerateContent REST API with top-level `store: false`, overriding project-level logging for those requests.
+Hosting target is Vercel only. Runtime entrypoints are framework-free Vercel Functions: `api/server.ts` for MCP and `api/health.ts` for health. `vercel.json` rewrites the public `/mcp` and `/health` paths to those functions. Next.js and React are not runtime dependencies.
+
+The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. Both Gemini polish and semantic-validation requests use the server-side GenerateContent REST API with top-level `store: false`, overriding project-level logging for those requests.
 
 Configure secrets only as Vercel environment variables:
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
@@ -48,10 +50,9 @@ npm ci
 npm audit --audit-level=high
 npm run typecheck
 npm test
-npm run build
 ```
 
-CI performs the same checks on the development branch. No real Gemini key is required for unit tests; provider calls are mocked.
+CI performs these checks on the development branch. No real Gemini key is required for unit tests; provider calls are mocked. The actual Vercel Functions packaging/build and live endpoint checks are performed in the deployment verification stage rather than by introducing a Vercel CLI dependency into the application tree.
 
 ## ChatGPT compatibility
 
