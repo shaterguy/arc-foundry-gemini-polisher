@@ -1,6 +1,7 @@
+import { buildLockedLayout, reconstructCandidate } from "./blocks";
 import { createGeminiProvider, getMaxPolishAttempts, getRuntimeModels, type PolishProvider } from "./gemini";
 import { sha256, validateDeterministic } from "./preservation";
-import type { PolishInput, PolishResult } from "./types";
+import { PROTECTED_MANIFEST_SOURCE, type PolishInput, type PolishResult } from "./types";
 
 export interface PolishOptions {
   maxAttempts?: number;
@@ -32,12 +33,31 @@ function fallback(
   };
 }
 
+function protectedTermsOrNull(input: PolishInput): string[] | null {
+  const manifest = input.protected_manifest;
+  if (!manifest || manifest.source !== PROTECTED_MANIFEST_SOURCE || !Array.isArray(manifest.terms)) return null;
+  const terms = manifest.terms.map((term) => term.trim());
+  if (terms.length === 0 || terms.some((term) => term.length === 0 || term.length > 100)) return null;
+  if (new Set(terms).size !== terms.length) return null;
+  return terms;
+}
+
 export async function polishLockedText(
   input: PolishInput,
   provider?: PolishProvider,
   options: PolishOptions = {},
 ): Promise<PolishResult> {
   const runtimeModels = getRuntimeModels();
+  const protectedTerms = protectedTermsOrNull(input);
+  if (!protectedTerms) {
+    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, ["protected manifest missing or invalid"]);
+  }
+
+  const layout = buildLockedLayout(input.locked_text);
+  if (layout.editable_blocks.length === 0) {
+    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, ["locked source has no editable blocks"]);
+  }
+
   let activeProvider = provider;
   if (!activeProvider) {
     try {
@@ -56,12 +76,21 @@ export async function polishLockedText(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let candidate: string;
     try {
-      candidate = await activeProvider.polish(input, rejectionNotes);
-    } catch {
-      return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, false, false, ["Gemini polish request failed"]);
+      const polishedBlocks = await activeProvider.polish(input, rejectionNotes);
+      candidate = reconstructCandidate(layout, polishedBlocks);
+    } catch (error) {
+      const message = error instanceof Error && error.message.startsWith("block_manifest_")
+        ? `scene_order: ${error.message}`
+        : "Gemini polish request failed";
+      if (message.startsWith("scene_order:")) {
+        latestViolations = [message];
+        rejectionNotes = latestViolations;
+        continue;
+      }
+      return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, false, false, [message]);
     }
 
-    const deterministic = validateDeterministic(input.locked_text, candidate, input.protected_terms);
+    const deterministic = validateDeterministic(input.locked_text, candidate, protectedTerms);
     deterministicPassed = deterministic.passed;
     if (!deterministic.passed) {
       latestViolations = deterministic.violations;
@@ -71,7 +100,7 @@ export async function polishLockedText(
 
     let semantic;
     try {
-      semantic = await activeProvider.validate(input.locked_text, candidate, input.protected_terms);
+      semantic = await activeProvider.validate(input.locked_text, candidate, protectedTerms);
     } catch {
       return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, true, false, ["Gemini validation request failed"]);
     }

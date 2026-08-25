@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { polishLockedText } from "../../lib/polisher";
+import { PROTECTED_MANIFEST_SOURCE } from "../../lib/types";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -11,7 +12,10 @@ const inputSchema = z.object({
   before_context: z.string().max(30_000).optional().describe("Read-only context before the target"),
   after_context: z.string().max(30_000).optional().describe("Read-only context after the target"),
   style_rules: z.string().max(20_000).optional().describe("Read-only Arc Foundry style rules"),
-  protected_terms: z.array(z.string().min(1).max(100)).max(300).default([]).describe("Names and terms whose occurrence counts must remain unchanged"),
+  protected_manifest: z.object({
+    source: z.literal(PROTECTED_MANIFEST_SOURCE),
+    terms: z.array(z.string().trim().min(1).max(100)).min(1).max(500),
+  }).strict().describe("Required authoritative protected-term manifest built from Arc Foundry final-lock ledgers"),
   unit_id: z.string().max(200).optional().describe("Episode/scene identifier for caller traceability; not stored"),
 }).strict();
 

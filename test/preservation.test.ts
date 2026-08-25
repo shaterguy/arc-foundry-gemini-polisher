@@ -14,14 +14,26 @@ test("number or date change is rejected", () => {
   assert.ok(result.violations.some((value) => value.startsWith("number/date:")));
 });
 
-test("protected term deletion is rejected", () => {
-  const result = validateDeterministic("민재가 문을 열었다.", "그가 문을 열었다.", ["민재"]);
+test("protected term deletion or mutation is rejected", () => {
+  const result = validateDeterministic("민재가 문을 열었다.", "민수가 문을 열었다.", ["민재"]);
   assert.equal(result.passed, false);
   assert.ok(result.violations.some((value) => value.includes("protected term")));
 });
 
 test("scene separator changes are rejected", () => {
-  const result = validateDeterministic("첫 장면\n***\n둘째 장면", "첫 장면\n둘째 장면", []);
+  const result = validateDeterministic("첫 장면\n***\n둘째 장면", "첫 장면\n---\n둘째 장면", ["첫 장면"]);
+  assert.equal(result.passed, false);
+  assert.ok(result.violations.some((value) => value.startsWith("scene_order:")));
+});
+
+test("dialogue position changes are rejected", () => {
+  const result = validateDeterministic("서술.\n\"대사.\"", "\"대사.\"\n서술.", ["서술"]);
+  assert.equal(result.passed, false);
+  assert.ok(result.violations.some((value) => value.startsWith("dialogue_meaning:")));
+});
+
+test("paragraph addition is rejected", () => {
+  const result = validateDeterministic("첫 줄.", "첫 줄.\n새 설정.", ["첫 줄"]);
   assert.equal(result.passed, false);
   assert.ok(result.violations.some((value) => value.startsWith("scene_order:")));
 });
@@ -29,7 +41,7 @@ test("scene separator changes are rejected", () => {
 test("gross deletion is rejected", () => {
   const original = "가".repeat(1000);
   const candidate = "가".repeat(400);
-  const result = validateDeterministic(original, candidate, []);
+  const result = validateDeterministic(original, candidate, ["가"]);
   assert.equal(result.passed, false);
   assert.ok(result.violations.some((value) => value.startsWith("deletion:")));
 });

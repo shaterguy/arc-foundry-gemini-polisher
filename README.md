@@ -8,7 +8,7 @@ This server runs only after **FINAL CONTENT LOCK**. Gemini has no narrative auth
 
 It must not change events, scene order, setting/worldbuilding, character actions or intent, relationships, dialogue meaning, emotional meaning/intensity, POV, tense, proper nouns, numbers, dates, factual relationships, foreshadowing, or add/delete narrative information.
 
-The tool never writes to Google Drive. It returns an accepted polished candidate only after deterministic protected-value checks and a separate semantic-preservation validation. Any provider/configuration/validation failure returns the exact locked source as `fallback_original`.
+The tool never writes to Google Drive. It returns an accepted polished candidate only after deterministic protected-value/position checks and a separate semantic-preservation validation. Any provider/configuration/validation failure returns the exact locked source as `fallback_original`.
 
 ## MCP tool
 
@@ -18,13 +18,15 @@ Default unit: one Arc Foundry episode. If a caller must split a long episode, sp
 
 Important inputs:
 - `locked_text`: exact FINAL CONTENT LOCK source.
-- `protected_terms`: character/place/item names and other tokens that must retain their exact occurrence counts.
+- `protected_manifest`: required manifest with `source: "arc-foundry-final-lock"` and a non-empty unique `terms` list assembled from the authoritative Arc Foundry final-lock ledgers. Missing or malformed manifests fail closed.
 - `style_rules`: optional read-only Arc Foundry style rules.
 - `before_context`, `after_context`: optional read-only context.
 
+The server derives immutable line block IDs from `locked_text`. Blank lines and explicit scene separators are copied from the locked source, not generated. Gemini may only return replacement text for existing editable block IDs in the exact original order; block addition, deletion, reordering, splitting, merging, or embedded newlines are rejected before semantic validation.
+
 ## Runtime and secrets
 
-Hosting target is Vercel only. The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. It uses Gemini `generateContent`, which is the non-persistent request path rather than the stored Interactions API.
+Hosting target is Vercel only. The implementation is stateless and has no database, Blob/KV storage, Gemini File API, cached-content, or Interactions storage dependency. Raw manuscript/candidate text is not logged by application code. Both Gemini polish and semantic-validation requests use the server-side GenerateContent REST API with top-level `store: false`, overriding project-level logging for those requests.
 
 Configure secrets only as Vercel environment variables:
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
@@ -42,7 +44,8 @@ The `/mcp` route fails closed with HTTP 503 if `MCP_BEARER_TOKEN` is absent. A b
 ## Development
 
 ```bash
-npm install
+npm ci
+npm audit --audit-level=high
 npm run typecheck
 npm test
 npm run build

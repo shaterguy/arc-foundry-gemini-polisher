@@ -1,3 +1,5 @@
+export const PROTECTED_MANIFEST_SOURCE = "arc-foundry-final-lock" as const;
+
 export const VIOLATION_CATEGORIES = [
   "event",
   "scene_order",
@@ -19,13 +21,28 @@ export const VIOLATION_CATEGORIES = [
 
 export type ViolationCategory = (typeof VIOLATION_CATEGORIES)[number];
 
+export interface ProtectedManifest {
+  source: typeof PROTECTED_MANIFEST_SOURCE;
+  terms: string[];
+}
+
 export interface PolishInput {
   locked_text: string;
   before_context?: string;
   after_context?: string;
   style_rules?: string;
-  protected_terms: string[];
+  protected_manifest: ProtectedManifest;
   unit_id?: string;
+}
+
+export interface EditableBlock {
+  block_id: string;
+  source_text: string;
+}
+
+export interface PolishedBlock {
+  block_id: string;
+  polished_text: string;
 }
 
 export interface SemanticViolation {
