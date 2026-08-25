@@ -1,0 +1,31 @@
+{
+  "name": "arc-foundry-gemini-polisher",
+  "version": "0.1.0-dev1",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "2.18.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "mcp-handler": "2.1.1",
+    "next": "16.3.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/react": "19.2.18",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3"
+  }
+}
