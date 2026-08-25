@@ -9,13 +9,14 @@ import {
   type StateTransaction,
   emptyOAuthState,
   exchangeAuthorizationCode,
-  hashOpaque,
   issueAuthorizationCode,
   pkceChallenge,
   rotateRefreshToken,
   validateAuthorizationRequest,
   verifyAccessToken,
 } from "../lib/oauth";
+
+process.env.OAUTH_OWNER_SECRET = "test-owner-secret-" + "x".repeat(64);
 
 class MemoryStore implements OAuthStateStore {
   state: OAuthState = emptyOAuthState();
@@ -92,8 +93,10 @@ test("authorization code is single-use, PKCE-bound and tokens are stored only by
   }), 2_000);
   assert.equal(tokens.token_type, "Bearer");
   assert.equal((await verifyAccessToken(store, tokens.access_token, 2_001))?.clientId, clientId);
-  assert.equal(Object.hasOwn(store.state.accessTokens, hashOpaque(tokens.access_token)), true);
-  assert.equal(Object.hasOwn(store.state.refreshTokens, hashOpaque(tokens.refresh_token)), true);
+  assert.equal(Object.keys(store.state.refreshFamilies).length, 1);
+  const family = Object.values(store.state.refreshFamilies)[0];
+  assert.equal(family.currentTokenHash.length, 64);
+  assert.equal(family.currentGeneration, 1);
   assert.equal(JSON.stringify(store.state).includes(tokens.access_token), false);
   assert.equal(JSON.stringify(store.state).includes(tokens.refresh_token), false);
   assert.equal(JSON.stringify(store.state).includes(code), false);
@@ -134,6 +137,8 @@ test("refresh rotation detects replay and revokes the entire family", async () =
     grant_type: "refresh_token", refresh_token: initial.refresh_token, client_id: clientId, resource: OAUTH_RESOURCE,
   }), 3_100), "invalid_grant");
   assert.equal(await verifyAccessToken(store, rotated.access_token, 3_101), undefined);
+  assert.equal(Object.keys(store.state.refreshFamilies).length, 1);
+  assert.equal(Object.keys(store.state.revokedFamilies).length, 1);
 });
 
 test("wrong resource and scope expansion are rejected", async () => {

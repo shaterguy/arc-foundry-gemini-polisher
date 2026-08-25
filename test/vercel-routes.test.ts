@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { GET as healthGET } from "../api/health";
 import { GET as metadataGET } from "../api/oauth-metadata";
 import { GET as protectedResourceGET } from "../api/oauth-protected-resource";
 import { GET as mcpGET } from "../api/server";
-import { OAUTH_ORIGIN, OAUTH_RESOURCE, OAUTH_SCOPE } from "../lib/oauth";
+import { OAUTH_ORIGIN, OAUTH_RESOURCE, OAUTH_RESOURCE_METADATA_PATH, OAUTH_SCOPE } from "../lib/oauth";
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -38,6 +39,15 @@ test("protected resource metadata binds the canonical /mcp resource", async () =
   assert.equal(body.resource, OAUTH_RESOURCE);
   assert.deepEqual(body.authorization_servers, [OAUTH_ORIGIN]);
   assert.deepEqual(body.scopes_supported, [OAUTH_SCOPE]);
+});
+
+test("Vercel exposes only the RFC 9728 path-derived protected-resource metadata route", () => {
+  const config = JSON.parse(readFileSync(new URL("../vercel.json", import.meta.url), "utf8")) as {
+    rewrites: Array<{ source: string }>;
+  };
+  const sources = config.rewrites.map((rewrite) => rewrite.source);
+  assert.equal(sources.includes(OAUTH_RESOURCE_METADATA_PATH), true);
+  assert.equal(sources.includes("/.well-known/oauth-protected-resource"), false);
 });
 
 test("MCP function fails closed when OAuth runtime secrets are missing", async () => {

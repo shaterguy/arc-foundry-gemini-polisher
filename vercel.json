@@ -5,7 +5,6 @@
     { "source": "/mcp", "destination": "/api/server" },
     { "source": "/health", "destination": "/api/health" },
     { "source": "/.well-known/oauth-protected-resource/mcp", "destination": "/api/oauth-protected-resource" },
-    { "source": "/.well-known/oauth-protected-resource", "destination": "/api/oauth-protected-resource" },
     { "source": "/.well-known/oauth-authorization-server", "destination": "/api/oauth-metadata" },
     { "source": "/oauth/authorize", "destination": "/api/oauth-authorize" },
     { "source": "/oauth/token", "destination": "/api/oauth-token" }

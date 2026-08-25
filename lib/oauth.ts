@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { BlobPreconditionFailedError, get, put } from "@vercel/blob";
 
 export const OAUTH_ORIGIN = "https://arc-foundry-gemini-polisher.vercel.app";
@@ -6,7 +6,7 @@ export const OAUTH_RESOURCE = `${OAUTH_ORIGIN}/mcp`;
 export const OAUTH_SCOPE = "polish:invoke";
 export const OAUTH_OFFLINE_SCOPE = "offline_access";
 export const OAUTH_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp";
-export const OAUTH_STATE_PATH = "oauth/state-v1.json";
+export const OAUTH_STATE_PATH = "oauth/state-v2.json";
 export const OAUTH_STATE_MAX_BYTES = 256 * 1024;
 export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
 export const AUTH_CODE_TTL_MS = 2 * 60 * 1000;
@@ -14,6 +14,8 @@ export const REFRESH_FAMILY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const OWNER_ATTEMPT_TTL_MS = 5 * 60 * 1000;
 export const OWNER_ATTEMPT_LIMIT = 5;
 const STORE_RETRIES = 3;
+const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const TOKEN_PART_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 
 export interface AuthorizationRequest {
   clientId: string;
@@ -39,17 +41,17 @@ export interface AccessTokenRecord {
   resource: string;
   scopes: string[];
   subject: "owner";
-  familyId: string;
+  familyKey: string;
   expiresAt: number;
 }
 
-interface RefreshTokenRecord {
+interface RefreshFamilyRecord {
   clientId: string;
   resource: string;
   scopes: string[];
   subject: "owner";
-  familyId: string;
-  status: "active" | "spent" | "revoked";
+  currentGeneration: number;
+  currentTokenHash: string;
   expiresAt: number;
 }
 
@@ -59,10 +61,10 @@ interface OwnerFailureRecord {
 }
 
 export interface OAuthState {
-  version: 1;
+  version: 2;
   codes: Record<string, AuthorizationCodeRecord>;
   accessTokens: Record<string, AccessTokenRecord>;
-  refreshTokens: Record<string, RefreshTokenRecord>;
+  refreshFamilies: Record<string, RefreshFamilyRecord>;
   revokedFamilies: Record<string, number>;
   ownerFailures: Record<string, OwnerFailureRecord>;
 }
@@ -75,6 +77,28 @@ export interface StateTransaction<T> {
 export interface OAuthStateStore {
   read(): Promise<OAuthState>;
   transact<T>(mutator: (state: OAuthState) => StateTransaction<T>): Promise<T>;
+}
+
+export interface OAuthBlobGetResult {
+  statusCode: number;
+  stream: ReadableStream<Uint8Array> | null;
+  blob: {
+    size: number;
+    etag?: string;
+  };
+}
+
+export interface OAuthBlobAdapter {
+  get(pathname: string, options: { access: "private"; useCache: boolean; token: string }): Promise<OAuthBlobGetResult | null>;
+  put(pathname: string, body: string, options: {
+    access: "private";
+    addRandomSuffix: boolean;
+    allowOverwrite: boolean;
+    ifMatch?: string;
+    contentType: string;
+    cacheControlMaxAge: number;
+    token: string;
+  }): Promise<unknown>;
 }
 
 export class OAuthProtocolError extends Error {
@@ -96,10 +120,10 @@ export class OAuthStorageError extends Error {
 
 export function emptyOAuthState(): OAuthState {
   return {
-    version: 1,
+    version: 2,
     codes: {},
     accessTokens: {},
-    refreshTokens: {},
+    refreshFamilies: {},
     revokedFamilies: {},
     ownerFailures: {},
   };
@@ -109,7 +133,75 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function parseOAuthState(text: string): OAuthState {
+function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isSafeExpiry(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isStoredClientId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 512) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "chatgpt.com" && !url.port && !url.username && !url.password
+      && !url.search && !url.hash && url.pathname.startsWith("/oauth/") && url.pathname.endsWith("/client.json")
+      && !url.pathname.includes("..");
+  } catch {
+    return false;
+  }
+}
+
+function isStoredRedirectUri(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "chatgpt.com" && !url.port && !url.username && !url.password
+      && !url.search && !url.hash && /^\/connector\/oauth\/[A-Za-z0-9._~-]{1,240}$/u.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isStoredScopes(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 2 || !value.every((scope) => typeof scope === "string")) return false;
+  const scopes = value as string[];
+  return new Set(scopes).size === scopes.length && scopes.includes(OAUTH_SCOPE)
+    && scopes.every((scope) => scope === OAUTH_SCOPE || scope === OAUTH_OFFLINE_SCOPE);
+}
+
+function validateAuthorizationCodeRecord(value: unknown): value is AuthorizationCodeRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ["clientId", "redirectUri", "resource", "scopes", "codeChallenge", "subject", "expiresAt"])) return false;
+  return isStoredClientId(value.clientId) && isStoredRedirectUri(value.redirectUri) && value.resource === OAUTH_RESOURCE
+    && isStoredScopes(value.scopes) && typeof value.codeChallenge === "string" && /^[A-Za-z0-9_-]{43,128}$/u.test(value.codeChallenge)
+    && value.subject === "owner" && isSafeExpiry(value.expiresAt);
+}
+
+function validateAccessTokenRecord(value: unknown): value is AccessTokenRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ["clientId", "resource", "scopes", "subject", "familyKey", "expiresAt"])) return false;
+  return isStoredClientId(value.clientId) && value.resource === OAUTH_RESOURCE && isStoredScopes(value.scopes)
+    && value.subject === "owner" && typeof value.familyKey === "string" && HASH_PATTERN.test(value.familyKey)
+    && isSafeExpiry(value.expiresAt);
+}
+
+function validateRefreshFamilyRecord(value: unknown): value is RefreshFamilyRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ["clientId", "resource", "scopes", "subject", "currentGeneration", "currentTokenHash", "expiresAt"])) return false;
+  return isStoredClientId(value.clientId) && value.resource === OAUTH_RESOURCE && isStoredScopes(value.scopes)
+    && value.subject === "owner" && typeof value.currentGeneration === "number" && Number.isSafeInteger(value.currentGeneration)
+    && value.currentGeneration > 0 && typeof value.currentTokenHash === "string" && HASH_PATTERN.test(value.currentTokenHash)
+    && isSafeExpiry(value.expiresAt);
+}
+
+function validateOwnerFailureRecord(value: unknown): value is OwnerFailureRecord {
+  if (!isRecord(value) || !hasExactKeys(value, ["count", "expiresAt"])) return false;
+  return typeof value.count === "number" && Number.isSafeInteger(value.count) && value.count >= 1 && value.count <= OWNER_ATTEMPT_LIMIT
+    && isSafeExpiry(value.expiresAt);
+}
+
+export function parseOAuthState(text: string): OAuthState {
   if (Buffer.byteLength(text, "utf8") > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
   let parsed: unknown;
   try {
@@ -117,24 +209,52 @@ function parseOAuthState(text: string): OAuthState {
   } catch {
     throw new OAuthStorageError();
   }
-  if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.codes) || !isRecord(parsed.accessTokens)
-    || !isRecord(parsed.refreshTokens) || !isRecord(parsed.revokedFamilies) || !isRecord(parsed.ownerFailures)) {
+  if (!isRecord(parsed) || !hasExactKeys(parsed, ["version", "codes", "accessTokens", "refreshFamilies", "revokedFamilies", "ownerFailures"])
+    || parsed.version !== 2 || !isRecord(parsed.codes) || !isRecord(parsed.accessTokens) || !isRecord(parsed.refreshFamilies)
+    || !isRecord(parsed.revokedFamilies) || !isRecord(parsed.ownerFailures)) {
     throw new OAuthStorageError();
   }
-  return parsed as unknown as OAuthState;
+
+  for (const [key, record] of Object.entries(parsed.codes)) {
+    if (!HASH_PATTERN.test(key) || !validateAuthorizationCodeRecord(record)) throw new OAuthStorageError();
+  }
+  for (const [key, record] of Object.entries(parsed.accessTokens)) {
+    if (!HASH_PATTERN.test(key) || !validateAccessTokenRecord(record)) throw new OAuthStorageError();
+  }
+  for (const [key, record] of Object.entries(parsed.refreshFamilies)) {
+    if (!HASH_PATTERN.test(key) || !validateRefreshFamilyRecord(record)) throw new OAuthStorageError();
+  }
+  for (const [key, expiresAt] of Object.entries(parsed.revokedFamilies)) {
+    if (!HASH_PATTERN.test(key) || !isSafeExpiry(expiresAt)) throw new OAuthStorageError();
+  }
+  for (const [key, record] of Object.entries(parsed.ownerFailures)) {
+    if (!HASH_PATTERN.test(key) || !validateOwnerFailureRecord(record)) throw new OAuthStorageError();
+  }
+
+  const state = parsed as unknown as OAuthState;
+  for (const record of Object.values(state.accessTokens)) {
+    const family = state.refreshFamilies[record.familyKey];
+    if (!family || family.clientId !== record.clientId || family.resource !== record.resource
+      || !record.scopes.every((scope) => family.scopes.includes(scope))) throw new OAuthStorageError();
+  }
+  for (const [familyKey, expiresAt] of Object.entries(state.revokedFamilies)) {
+    const family = state.refreshFamilies[familyKey];
+    if (!family || family.expiresAt !== expiresAt) throw new OAuthStorageError();
+  }
+  return state;
 }
 
 function pruneState(state: OAuthState, now = Date.now()): void {
   for (const [key, record] of Object.entries(state.codes)) if (record.expiresAt <= now) delete state.codes[key];
   for (const [key, record] of Object.entries(state.accessTokens)) if (record.expiresAt <= now) delete state.accessTokens[key];
-  for (const [key, record] of Object.entries(state.refreshTokens)) if (record.expiresAt <= now) delete state.refreshTokens[key];
+  for (const [key, record] of Object.entries(state.refreshFamilies)) if (record.expiresAt <= now) delete state.refreshFamilies[key];
   for (const [key, expiresAt] of Object.entries(state.revokedFamilies)) if (expiresAt <= now) delete state.revokedFamilies[key];
   for (const [key, record] of Object.entries(state.ownerFailures)) if (record.expiresAt <= now) delete state.ownerFailures[key];
 }
 
 function ensureStateCapacity(state: OAuthState): void {
   if (Object.keys(state.codes).length > 128 || Object.keys(state.accessTokens).length > 256
-    || Object.keys(state.refreshTokens).length > 256 || Object.keys(state.revokedFamilies).length > 128
+    || Object.keys(state.refreshFamilies).length > 128 || Object.keys(state.revokedFamilies).length > 128
     || Object.keys(state.ownerFailures).length > 128) {
     throw new OAuthStorageError();
   }
@@ -152,12 +272,22 @@ function isCasConflict(error: unknown): boolean {
   return /precondition|already exists|conflict|\b409\b|\b412\b/iu.test(message);
 }
 
+const defaultBlobAdapter: OAuthBlobAdapter = {
+  get: (pathname, options) => get(pathname, options),
+  put: (pathname, body, options) => put(pathname, body, options),
+};
+
 export class BlobOAuthStore implements OAuthStateStore {
+  constructor(
+    private readonly blob: OAuthBlobAdapter = defaultBlobAdapter,
+    private readonly tokenProvider: () => string = blobToken,
+  ) {}
+
   private async snapshot(): Promise<{ state: OAuthState; etag: string | null; exists: boolean }> {
     try {
-      const result = await get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: blobToken() });
+      const result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: this.tokenProvider() });
       if (!result) return { state: emptyOAuthState(), etag: null, exists: false };
-      if (result.statusCode !== 200 || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
+      if (result.statusCode !== 200 || !result.stream || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
       const text = await new Response(result.stream).text();
       const state = parseOAuthState(text);
       pruneState(state);
@@ -181,16 +311,16 @@ export class BlobOAuthStore implements OAuthStateStore {
       if (!result.commit) return result.value;
       ensureStateCapacity(state);
       const body = JSON.stringify(state);
-      if (Buffer.byteLength(body, "utf8") > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
+      parseOAuthState(body);
       try {
-        await put(OAUTH_STATE_PATH, body, {
+        await this.blob.put(OAUTH_STATE_PATH, body, {
           access: "private",
           addRandomSuffix: false,
           allowOverwrite: snapshot.exists,
           ...(snapshot.exists && snapshot.etag ? { ifMatch: snapshot.etag } : {}),
           contentType: "application/json",
           cacheControlMaxAge: 60,
-          token: blobToken(),
+          token: this.tokenProvider(),
         });
         return result.value;
       } catch (error) {
@@ -234,6 +364,37 @@ export function getOwnerSecret(): string {
   const secret = process.env.OAUTH_OWNER_SECRET;
   if (!secret || secret.length < 43) throw new OAuthProtocolError("temporarily_unavailable", 503);
   return secret;
+}
+
+function refreshTokenMac(payload: string): string {
+  return createHmac("sha256", getOwnerSecret())
+    .update("arc-foundry-refresh-token-v1\u0000", "utf8")
+    .update(payload, "utf8")
+    .digest("base64url");
+}
+
+function mintRefreshToken(familyId: string, generation: number): string {
+  const secret = randomOpaqueToken();
+  const payload = `r1.${familyId}.${generation}.${secret}`;
+  return `${payload}.${refreshTokenMac(payload)}`;
+}
+
+interface ParsedRefreshToken {
+  familyKey: string;
+  generation: number;
+  tokenHash: string;
+}
+
+function parseRefreshToken(token: string): ParsedRefreshToken | undefined {
+  if (!token || token.length > 512) return undefined;
+  const parts = token.split(".");
+  if (parts.length !== 5 || parts[0] !== "r1" || !TOKEN_PART_PATTERN.test(parts[1]) || !TOKEN_PART_PATTERN.test(parts[3])
+    || !TOKEN_PART_PATTERN.test(parts[4]) || !/^[1-9][0-9]{0,15}$/u.test(parts[2])) return undefined;
+  const generation = Number(parts[2]);
+  if (!Number.isSafeInteger(generation) || generation <= 0) return undefined;
+  const payload = parts.slice(0, 4).join(".");
+  if (!constantTimeEqual(parts[4], refreshTokenMac(payload))) return undefined;
+  return { familyKey: hashOpaque(parts[1]), generation, tokenHash: hashOpaque(token) };
 }
 
 function normalizeScopes(raw: string): string[] {
@@ -385,14 +546,18 @@ export interface TokenResponse {
   scope: string;
 }
 
-function revokeFamily(state: OAuthState, familyId: string, until: number): void {
-  state.revokedFamilies[familyId] = until;
-  for (const [key, record] of Object.entries(state.refreshTokens)) {
-    if (record.familyId === familyId) state.refreshTokens[key] = { ...record, status: "revoked" };
-  }
+function revokeFamily(state: OAuthState, familyKey: string, until: number): void {
+  state.revokedFamilies[familyKey] = until;
   for (const [key, record] of Object.entries(state.accessTokens)) {
-    if (record.familyId === familyId) delete state.accessTokens[key];
+    if (record.familyKey === familyKey) delete state.accessTokens[key];
   }
+}
+
+function replaceFamilyAccessToken(state: OAuthState, familyKey: string, token: string, record: AccessTokenRecord): void {
+  for (const [key, existing] of Object.entries(state.accessTokens)) {
+    if (existing.familyKey === familyKey) delete state.accessTokens[key];
+  }
+  state.accessTokens[hashOpaque(token)] = record;
 }
 
 export async function exchangeAuthorizationCode(
@@ -411,8 +576,9 @@ export async function exchangeAuthorizationCode(
   validateVerifier(verifier);
   const codeKey = hashOpaque(code);
   const accessToken = randomOpaqueToken();
-  const refreshToken = randomOpaqueToken();
   const familyId = randomOpaqueToken();
+  const familyKey = hashOpaque(familyId);
+  const refreshToken = mintRefreshToken(familyId, 1);
   const result = await store.transact((state) => {
     const record = state.codes[codeKey];
     if (!record || record.expiresAt <= now || record.clientId !== clientId || record.redirectUri !== redirectUri
@@ -421,12 +587,18 @@ export async function exchangeAuthorizationCode(
     }
     delete state.codes[codeKey];
     const absoluteExpiry = now + REFRESH_FAMILY_TTL_MS;
-    state.accessTokens[hashOpaque(accessToken)] = {
-      clientId, resource, scopes: record.scopes, subject: "owner", familyId, expiresAt: now + ACCESS_TOKEN_TTL_MS,
+    state.refreshFamilies[familyKey] = {
+      clientId,
+      resource,
+      scopes: record.scopes,
+      subject: "owner",
+      currentGeneration: 1,
+      currentTokenHash: hashOpaque(refreshToken),
+      expiresAt: absoluteExpiry,
     };
-    state.refreshTokens[hashOpaque(refreshToken)] = {
-      clientId, resource, scopes: record.scopes, subject: "owner", familyId, status: "active", expiresAt: absoluteExpiry,
-    };
+    replaceFamilyAccessToken(state, familyKey, accessToken, {
+      clientId, resource, scopes: record.scopes, subject: "owner", familyKey, expiresAt: now + ACCESS_TOKEN_TTL_MS,
+    });
     return { value: { scopes: record.scopes }, commit: true };
   });
   if (!result) throw new OAuthProtocolError("invalid_grant");
@@ -455,29 +627,40 @@ export async function rotateRefreshToken(
   const resource = form.get("resource") ?? "";
   if (!refreshToken || !clientId || resource !== OAUTH_RESOURCE) throw new OAuthProtocolError("invalid_grant");
   validateClientIdUrl(clientId);
+  const parsedToken = parseRefreshToken(refreshToken);
+  if (!parsedToken) throw new OAuthProtocolError("invalid_grant");
   const requestedScopeRaw = form.get("scope");
   const requestedScopes = requestedScopeRaw ? normalizeScopes(requestedScopeRaw) : null;
-  const oldKey = hashOpaque(refreshToken);
   const newAccessToken = randomOpaqueToken();
-  const newRefreshToken = randomOpaqueToken();
+  const nextGeneration = parsedToken.generation + 1;
+  if (!Number.isSafeInteger(nextGeneration)) throw new OAuthProtocolError("invalid_grant");
+  const familyId = refreshToken.split(".")[1];
+  const newRefreshToken = mintRefreshToken(familyId, nextGeneration);
   const outcome = await store.transact<RefreshOutcome>((state) => {
-    const record = state.refreshTokens[oldKey];
+    const record = state.refreshFamilies[parsedToken.familyKey];
     if (!record || record.clientId !== clientId || record.resource !== resource || record.expiresAt <= now) {
       return { value: { kind: "invalid" as const }, commit: false };
     }
-    if (record.status !== "active" || state.revokedFamilies[record.familyId]) {
-      revokeFamily(state, record.familyId, record.expiresAt);
+    if (state.revokedFamilies[parsedToken.familyKey]) {
+      return { value: { kind: "replay" as const }, commit: false };
+    }
+    if (parsedToken.generation < record.currentGeneration) {
+      revokeFamily(state, parsedToken.familyKey, record.expiresAt);
       return { value: { kind: "replay" as const }, commit: true };
+    }
+    if (parsedToken.generation !== record.currentGeneration || parsedToken.tokenHash !== record.currentTokenHash) {
+      return { value: { kind: "invalid" as const }, commit: false };
     }
     const scopes = requestedScopes ?? record.scopes;
     if (!scopes.every((scope) => record.scopes.includes(scope)) || !scopes.includes(OAUTH_SCOPE)) {
       return { value: { kind: "scope" as const }, commit: false };
     }
-    state.refreshTokens[oldKey] = { ...record, status: "spent" };
-    state.refreshTokens[hashOpaque(newRefreshToken)] = { ...record, scopes, status: "active" };
-    state.accessTokens[hashOpaque(newAccessToken)] = {
-      clientId, resource, scopes, subject: "owner", familyId: record.familyId, expiresAt: now + ACCESS_TOKEN_TTL_MS,
-    };
+    record.scopes = scopes;
+    record.currentGeneration = nextGeneration;
+    record.currentTokenHash = hashOpaque(newRefreshToken);
+    replaceFamilyAccessToken(state, parsedToken.familyKey, newAccessToken, {
+      clientId, resource, scopes, subject: "owner", familyKey: parsedToken.familyKey, expiresAt: now + ACCESS_TOKEN_TTL_MS,
+    });
     return { value: { kind: "ok" as const, scopes }, commit: true };
   });
   if (outcome.kind === "scope") throw new OAuthProtocolError("invalid_scope");
@@ -499,8 +682,9 @@ export async function verifyAccessToken(
   if (!token || token.length > 512) return undefined;
   const state = await store.read();
   const record = state.accessTokens[hashOpaque(token)];
-  if (!record || record.expiresAt <= now || record.resource !== OAUTH_RESOURCE || !record.scopes.includes(OAUTH_SCOPE)
-    || state.revokedFamilies[record.familyId]) return undefined;
+  const family = record ? state.refreshFamilies[record.familyKey] : undefined;
+  if (!record || !family || record.expiresAt <= now || record.resource !== OAUTH_RESOURCE || !record.scopes.includes(OAUTH_SCOPE)
+    || state.revokedFamilies[record.familyKey]) return undefined;
   return record;
 }
 

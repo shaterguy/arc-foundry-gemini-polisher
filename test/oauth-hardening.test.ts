@@ -22,6 +22,8 @@ import {
   verifyAccessToken,
 } from "../lib/oauth";
 
+process.env.OAUTH_OWNER_SECRET = "test-owner-secret-" + "x".repeat(64);
+
 class MemoryStore implements OAuthStateStore {
   state: OAuthState = emptyOAuthState();
 
