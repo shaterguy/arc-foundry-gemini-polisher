@@ -68,20 +68,11 @@ jobs:
           if text.count('version: "0.1.0-dev3"') != 1:
               raise SystemExit('health version target mismatch')
           health.write_text(text.replace('version: "0.1.0-dev3"', 'version: "0.1.0-dev4"'))
-
-          ci = Path('.github/workflows/ci.yml')
-          text = ci.read_text()
-          anchor = '      - v0.1.0-dev3\n'
-          if text.count(anchor) != 1:
-              raise SystemExit('CI branch anchor mismatch')
-          ci.write_text(text.replace(anchor, anchor + '      - v0.1.0-dev4\n'))
-
-          Path('.github/workflows/dev4-oauth-redirect-fix.yml').unlink()
       - name: Commit exact dev4 candidate
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lib/oauth.ts api/oauth-authorize.ts test/oauth-browser-redirect.test.ts package.json package-lock.json api/health.ts .github/workflows/ci.yml .github/workflows/dev4-oauth-redirect-fix.yml
+          git add lib/oauth.ts api/oauth-authorize.ts test/oauth-browser-redirect.test.ts package.json package-lock.json api/health.ts
           git diff --cached --check
           git commit -m "fix: allow ChatGPT OAuth callback navigation"
           git push origin HEAD:v0.1.0-dev4
