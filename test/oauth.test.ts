@@ -55,6 +55,7 @@ const cimdFetch: typeof fetch = async (input) => {
   assert.equal(String(input), clientId);
   return new Response(JSON.stringify({
     client_id: clientId,
+    client_name: "ChatGPT",
     redirect_uris: [redirectUri],
     token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
   }), { status: 200, headers: { "content-type": "application/json" } });
@@ -70,6 +71,18 @@ test("authorization validates ChatGPT CIMD, exact redirect, resource, scope and 
   assert.equal(result.redirectUri, redirectUri);
   assert.equal(result.resource, OAUTH_RESOURCE);
   assert.deepEqual(result.scopes, [OAUTH_SCOPE, "offline_access"]);
+});
+
+test("authorization rejects CIMD without a bounded non-empty client_name", async () => {
+  const makeFetch = (clientName: unknown, includeName = true): typeof fetch => async () => new Response(JSON.stringify({
+    client_id: clientId,
+    ...(includeName ? { client_name: clientName } : {}),
+    redirect_uris: [redirectUri],
+    token_endpoint_auth_method: "none",
+  }), { status: 200, headers: { "content-type": "application/json" } });
+  await assertOAuthError(validateAuthorizationRequest(authorizationParams(), makeFetch(undefined, false)), "invalid_client");
+  await assertOAuthError(validateAuthorizationRequest(authorizationParams(), makeFetch("   ")), "invalid_client");
+  await assertOAuthError(validateAuthorizationRequest(authorizationParams(), makeFetch("x".repeat(201))), "invalid_client");
 });
 
 test("authorization rejects non-ChatGPT client IDs before network fetch", async () => {

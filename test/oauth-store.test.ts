@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ACCESS_TOKEN_TTL_MS,
   BlobOAuthStore,
   OAUTH_RESOURCE,
   OAUTH_SCOPE,
@@ -99,8 +100,11 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
   }
 }
 
-function storeWith(adapter = new FakeBlobAdapter()): { adapter: FakeBlobAdapter; store: BlobOAuthStore } {
-  return { adapter, store: new BlobOAuthStore(adapter, () => "test-blob-token") };
+function storeWith(
+  adapter = new FakeBlobAdapter(),
+  nowProvider: () => number = Date.now,
+): { adapter: FakeBlobAdapter; store: BlobOAuthStore } {
+  return { adapter, store: new BlobOAuthStore(adapter, () => "test-blob-token", nowProvider) };
 }
 
 function authRequest(): AuthorizationRequest {
@@ -244,4 +248,43 @@ test("more than 256 refresh rotations keep one bounded family record and preserv
   await assert.rejects(rotateRefreshToken(store, refreshForm(staleToken), now + 500),
     (error: unknown) => error instanceof OAuthProtocolError && error.oauthCode === "invalid_grant");
   assert.equal(Object.keys((await store.read()).revokedFamilies).length, 1);
+});
+
+test("access token never outlives its refresh family and state writes recover immediately after family expiry", async () => {
+  let clock = Date.now();
+  const adapter = new FakeBlobAdapter();
+  const { store } = storeWith(adapter, () => clock);
+  const code = await issueAuthorizationCode(store, authRequest(), clock);
+  const initial = await exchangeAuthorizationCode(store, codeForm(code), clock + 1);
+  const initialState = await store.read();
+  const familyKey = Object.keys(initialState.refreshFamilies)[0];
+  const familyExpiresAt = clock + 60_000;
+
+  await store.transact((state) => {
+    state.refreshFamilies[familyKey].expiresAt = familyExpiresAt;
+    for (const record of Object.values(state.accessTokens)) {
+      if (record.familyKey === familyKey) record.expiresAt = familyExpiresAt;
+    }
+    return { value: undefined, commit: true };
+  });
+
+  const rotatedAt = familyExpiresAt - 5_000;
+  const rotated = await rotateRefreshToken(store, refreshForm(initial.refresh_token), rotatedAt);
+  assert.equal(rotated.expires_in, 5);
+  const beforeExpiry = await store.read();
+  assert.equal(Object.values(beforeExpiry.accessTokens)[0].expiresAt, familyExpiresAt);
+  assert.ok(familyExpiresAt - rotatedAt < ACCESS_TOKEN_TTL_MS);
+
+  clock = familyExpiresAt + 1;
+  const expired = await store.read();
+  assert.equal(Object.keys(expired.refreshFamilies).length, 0);
+  assert.equal(Object.keys(expired.accessTokens).length, 0);
+  assert.equal(Object.keys(expired.revokedFamilies).length, 0);
+
+  const nextCode = await issueAuthorizationCode(store, authRequest(), clock);
+  assert.ok(nextCode.length > 0);
+  const recovered = await store.read();
+  assert.equal(Object.keys(recovered.codes).length, 1);
+  assert.equal(Object.keys(recovered.refreshFamilies).length, 0);
+  assert.equal(Object.keys(recovered.accessTokens).length, 0);
 });

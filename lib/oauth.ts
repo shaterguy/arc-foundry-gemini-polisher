@@ -235,7 +235,7 @@ export function parseOAuthState(text: string): OAuthState {
   for (const record of Object.values(state.accessTokens)) {
     const family = state.refreshFamilies[record.familyKey];
     if (!family || family.clientId !== record.clientId || family.resource !== record.resource
-      || !record.scopes.every((scope) => family.scopes.includes(scope))) throw new OAuthStorageError();
+      || record.expiresAt > family.expiresAt || !record.scopes.every((scope) => family.scopes.includes(scope))) throw new OAuthStorageError();
   }
   for (const [familyKey, expiresAt] of Object.entries(state.revokedFamilies)) {
     const family = state.refreshFamilies[familyKey];
@@ -281,6 +281,7 @@ export class BlobOAuthStore implements OAuthStateStore {
   constructor(
     private readonly blob: OAuthBlobAdapter = defaultBlobAdapter,
     private readonly tokenProvider: () => string = blobToken,
+    private readonly nowProvider: () => number = Date.now,
   ) {}
 
   private async snapshot(): Promise<{ state: OAuthState; etag: string | null; exists: boolean }> {
@@ -291,7 +292,7 @@ export class BlobOAuthStore implements OAuthStateStore {
         || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
       const text = await new Response(result.stream).text();
       const state = parseOAuthState(text);
-      pruneState(state);
+      pruneState(state, this.nowProvider());
       return { state, etag: result.blob.etag || null, exists: true };
     } catch (error) {
       if (error instanceof OAuthStorageError) throw error;
@@ -307,7 +308,7 @@ export class BlobOAuthStore implements OAuthStateStore {
     for (let attempt = 0; attempt < STORE_RETRIES; attempt += 1) {
       const snapshot = await this.snapshot();
       const state = structuredClone(snapshot.state);
-      pruneState(state);
+      pruneState(state, this.nowProvider());
       const result = mutator(state);
       if (!result.commit) return result.value;
       ensureStateCapacity(state);
@@ -437,6 +438,7 @@ function validateRedirectUri(redirectUri: string): void {
 
 interface CimdDocument {
   client_id?: unknown;
+  client_name?: unknown;
   redirect_uris?: unknown;
   token_endpoint_auth_method?: unknown;
   token_endpoint_auth_methods_supported?: unknown;
@@ -464,8 +466,9 @@ async function fetchCimd(clientId: string, redirectUri: string, fetchImpl: typeo
     } catch {
       throw new OAuthProtocolError("invalid_client");
     }
-    if (document.client_id !== clientId || !Array.isArray(document.redirect_uris)
-      || !document.redirect_uris.every((item) => typeof item === "string")
+    if (document.client_id !== clientId || typeof document.client_name !== "string"
+      || document.client_name.trim().length === 0 || document.client_name.length > 200
+      || !Array.isArray(document.redirect_uris) || !document.redirect_uris.every((item) => typeof item === "string")
       || !(document.redirect_uris as string[]).includes(redirectUri)) {
       throw new OAuthProtocolError("invalid_client");
     }
@@ -561,6 +564,10 @@ function replaceFamilyAccessToken(state: OAuthState, familyKey: string, token: s
   state.accessTokens[hashOpaque(token)] = record;
 }
 
+function expiresInSeconds(expiresAt: number, now: number): number {
+  return Math.max(0, Math.ceil((expiresAt - now) / 1000));
+}
+
 export async function exchangeAuthorizationCode(
   store: OAuthStateStore,
   form: URLSearchParams,
@@ -588,6 +595,7 @@ export async function exchangeAuthorizationCode(
     }
     delete state.codes[codeKey];
     const absoluteExpiry = now + REFRESH_FAMILY_TTL_MS;
+    const accessExpiresAt = Math.min(now + ACCESS_TOKEN_TTL_MS, absoluteExpiry);
     state.refreshFamilies[familyKey] = {
       clientId,
       resource,
@@ -598,15 +606,15 @@ export async function exchangeAuthorizationCode(
       expiresAt: absoluteExpiry,
     };
     replaceFamilyAccessToken(state, familyKey, accessToken, {
-      clientId, resource, scopes: record.scopes, subject: "owner", familyKey, expiresAt: now + ACCESS_TOKEN_TTL_MS,
+      clientId, resource, scopes: record.scopes, subject: "owner", familyKey, expiresAt: accessExpiresAt,
     });
-    return { value: { scopes: record.scopes }, commit: true };
+    return { value: { scopes: record.scopes, accessExpiresAt }, commit: true };
   });
   if (!result) throw new OAuthProtocolError("invalid_grant");
   return {
     access_token: accessToken,
     token_type: "Bearer",
-    expires_in: ACCESS_TOKEN_TTL_MS / 1000,
+    expires_in: expiresInSeconds(result.accessExpiresAt, now),
     refresh_token: refreshToken,
     scope: result.scopes.join(" "),
   };
@@ -616,7 +624,7 @@ type RefreshOutcome =
   | { kind: "invalid" }
   | { kind: "replay" }
   | { kind: "scope" }
-  | { kind: "ok"; scopes: string[] };
+  | { kind: "ok"; scopes: string[]; accessExpiresAt: number };
 
 export async function rotateRefreshToken(
   store: OAuthStateStore,
@@ -656,20 +664,21 @@ export async function rotateRefreshToken(
     if (!scopes.every((scope) => record.scopes.includes(scope)) || !scopes.includes(OAUTH_SCOPE)) {
       return { value: { kind: "scope" as const }, commit: false };
     }
+    const accessExpiresAt = Math.min(now + ACCESS_TOKEN_TTL_MS, record.expiresAt);
     record.scopes = scopes;
     record.currentGeneration = nextGeneration;
     record.currentTokenHash = hashOpaque(newRefreshToken);
     replaceFamilyAccessToken(state, parsedToken.familyKey, newAccessToken, {
-      clientId, resource, scopes, subject: "owner", familyKey: parsedToken.familyKey, expiresAt: now + ACCESS_TOKEN_TTL_MS,
+      clientId, resource, scopes, subject: "owner", familyKey: parsedToken.familyKey, expiresAt: accessExpiresAt,
     });
-    return { value: { kind: "ok" as const, scopes }, commit: true };
+    return { value: { kind: "ok" as const, scopes, accessExpiresAt }, commit: true };
   });
   if (outcome.kind === "scope") throw new OAuthProtocolError("invalid_scope");
   if (outcome.kind !== "ok") throw new OAuthProtocolError("invalid_grant");
   return {
     access_token: newAccessToken,
     token_type: "Bearer",
-    expires_in: ACCESS_TOKEN_TTL_MS / 1000,
+    expires_in: expiresInSeconds(outcome.accessExpiresAt, now),
     refresh_token: newRefreshToken,
     scope: outcome.scopes.join(" "),
   };

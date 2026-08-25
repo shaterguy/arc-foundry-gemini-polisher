@@ -60,6 +60,7 @@ function params(overrides: Record<string, string> = {}): URLSearchParams {
 function cimd(redirects: string[] = [redirectUri]): typeof fetch {
   return async () => new Response(JSON.stringify({
     client_id: clientId,
+    client_name: "ChatGPT",
     redirect_uris: redirects,
     token_endpoint_auth_method: "none",
   }), { status: 200, headers: { "content-type": "application/json" } });
