@@ -107,14 +107,27 @@ test("semantic violation falls back to exact locked source", async () => {
   assert.equal(result.final_text, input.locked_text);
 });
 
-test("provider failure falls back to exact locked source", async () => {
+test("provider failure falls back to exact locked source with sanitized status", async () => {
   const mock = provider({
     async polish() {
-      throw new Error("simulated outage");
+      throw new Error("gemini_http_503");
     },
   });
   const result = await polishLockedText(input, mock, { maxAttempts: 2 });
   assert.equal(result.status, "fallback_original");
   assert.equal(result.reason, "provider_failure");
   assert.equal(result.final_text, input.locked_text);
+  assert.deepEqual(result.validation.violations, ["Gemini polish request failed: gemini_http_503"]);
+});
+
+test("unknown provider failure does not leak exception text", async () => {
+  const mock = provider({
+    async polish() {
+      throw new Error("do-not-expose-upstream-detail");
+    },
+  });
+  const result = await polishLockedText(input, mock, { maxAttempts: 1 });
+  assert.equal(result.status, "fallback_original");
+  assert.equal(result.final_text, input.locked_text);
+  assert.deepEqual(result.validation.violations, ["Gemini polish request failed: provider_error"]);
 });
