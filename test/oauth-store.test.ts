@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { BlobAccessError, BlobServiceNotAvailable } from "@vercel/blob";
 import {
   ACCESS_TOKEN_TTL_MS,
   BlobOAuthStore,
@@ -15,6 +16,7 @@ import {
   exchangeAuthorizationCode,
   hashOpaque,
   issueAuthorizationCode,
+  oauthErrorResponse,
   pkceChallenge,
   rotateRefreshToken,
   verifyAccessToken,
@@ -25,6 +27,9 @@ process.env.OAUTH_OWNER_SECRET = "test-owner-secret-" + "x".repeat(64);
 const clientId = "https://chatgpt.com/oauth/arc-foundry/client.json";
 const redirectUri = "https://chatgpt.com/connector/oauth/callback-test";
 const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abc";
+
+type DiagnosticSink = NonNullable<ConstructorParameters<typeof BlobOAuthStore>[3]>;
+type Diagnostic = Parameters<DiagnosticSink>[0];
 
 interface ReadBarrier {
   remaining: number;
@@ -37,6 +42,8 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
   private etagVersion = 0;
   private conflicts = 0;
   private barrier: ReadBarrier | null = null;
+  private getFailure: unknown | undefined;
+  private putFailure: unknown | undefined;
 
   seed(body: string): void {
     this.body = body;
@@ -51,6 +58,14 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
     this.conflicts = count;
   }
 
+  failNextGet(error: unknown): void {
+    this.getFailure = error;
+  }
+
+  failNextPut(error: unknown): void {
+    this.putFailure = error;
+  }
+
   synchronizeNextReads(count: number): void {
     let release!: () => void;
     const promise = new Promise<void>((resolve) => { release = resolve; });
@@ -62,6 +77,11 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
   }
 
   async get(_pathname: string, _options: { access: "private"; useCache: boolean; token: string }): Promise<OAuthBlobGetResult | null> {
+    if (this.getFailure !== undefined) {
+      const failure = this.getFailure;
+      this.getFailure = undefined;
+      throw failure;
+    }
     const snapshotBody = this.body;
     const snapshotEtag = this.etag();
     const barrier = this.barrier;
@@ -88,6 +108,11 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
     cacheControlMaxAge: number;
     token: string;
   }): Promise<unknown> {
+    if (this.putFailure !== undefined) {
+      const failure = this.putFailure;
+      this.putFailure = undefined;
+      throw failure;
+    }
     if (this.conflicts > 0) {
       this.conflicts -= 1;
       throw new Error("precondition failed 412");
@@ -103,8 +128,9 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
 function storeWith(
   adapter = new FakeBlobAdapter(),
   nowProvider: () => number = Date.now,
+  diagnosticSink: DiagnosticSink = () => {},
 ): { adapter: FakeBlobAdapter; store: BlobOAuthStore } {
-  return { adapter, store: new BlobOAuthStore(adapter, () => "test-blob-token", nowProvider) };
+  return { adapter, store: new BlobOAuthStore(adapter, () => "test-blob-token", nowProvider, diagnosticSink) };
 }
 
 function authRequest(): AuthorizationRequest {
@@ -176,6 +202,54 @@ test("Blob store retries ifMatch conflict and fails closed after retry exhaustio
     state.ownerFailures[hashOpaque("retry-exhausted")] = { count: 1, expiresAt: now + 60_000 };
     return { value: undefined, commit: true };
   }), OAuthStorageError);
+});
+
+test("Blob store diagnostics expose only fixed stage and allowlisted error kind", async () => {
+  const diagnostics: Diagnostic[] = [];
+  const capture: DiagnosticSink = (diagnostic) => diagnostics.push(diagnostic);
+  const now = Date.now();
+
+  const access = storeWith(new FakeBlobAdapter(), Date.now, capture);
+  access.adapter.failNextGet(new BlobAccessError());
+  await assert.rejects(access.store.read(), OAuthStorageError);
+
+  const service = storeWith(new FakeBlobAdapter(), Date.now, capture);
+  service.adapter.seed(JSON.stringify(emptyOAuthState()));
+  service.adapter.failNextPut(new BlobServiceNotAvailable());
+  await assert.rejects(service.store.transact((state) => {
+    state.ownerFailures[hashOpaque("service-failure")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  }), OAuthStorageError);
+
+  const parse = storeWith(new FakeBlobAdapter(), Date.now, capture);
+  parse.adapter.seed("{");
+  await assert.rejects(parse.store.read(), OAuthStorageError);
+
+  const cas = storeWith(new FakeBlobAdapter(), Date.now, capture);
+  cas.adapter.seed(JSON.stringify(emptyOAuthState()));
+  cas.adapter.forceConflicts(3);
+  await assert.rejects(cas.store.transact((state) => {
+    state.ownerFailures[hashOpaque("cas-exhaustion")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  }), OAuthStorageError);
+
+  const secretLikeSentinel = "BLOB_READ_WRITE_TOKEN=sentinel-must-not-appear";
+  const unknown = storeWith(new FakeBlobAdapter(), Date.now, capture);
+  unknown.adapter.failNextGet(new Error(`provider detail ${secretLikeSentinel}`));
+  await assert.rejects(unknown.store.read(), OAuthStorageError);
+
+  assert.deepEqual(diagnostics, [
+    { event: "oauth_storage_failure", stage: "read_get", error_kind: "access_denied" },
+    { event: "oauth_storage_failure", stage: "write_put", error_kind: "service_unavailable" },
+    { event: "oauth_storage_failure", stage: "read_parse", error_kind: "unknown" },
+    { event: "oauth_storage_failure", stage: "cas_exhausted", error_kind: "unknown" },
+    { event: "oauth_storage_failure", stage: "read_get", error_kind: "unknown" },
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes(secretLikeSentinel), false);
+
+  const external = oauthErrorResponse(new Error(secretLikeSentinel));
+  assert.equal(external.status, 503);
+  assert.deepEqual(await external.json(), { error: "temporarily_unavailable" });
 });
 
 test("Blob store rejects corrupt nested state and oversized state at the persistence boundary", async () => {
