@@ -1,5 +1,17 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { BlobPreconditionFailedError, get, put } from "@vercel/blob";
+import {
+  BlobAccessError,
+  BlobNotFoundError,
+  BlobPreconditionFailedError,
+  BlobRequestAbortedError,
+  BlobServiceNotAvailable,
+  BlobServiceRateLimited,
+  BlobStoreNotFoundError,
+  BlobStoreSuspendedError,
+  BlobUnknownError,
+  get,
+  put,
+} from "@vercel/blob";
 
 export const OAUTH_ORIGIN = "https://arc-foundry-gemini-polisher.vercel.app";
 export const OAUTH_RESOURCE = `${OAUTH_ORIGIN}/mcp`;
@@ -16,6 +28,18 @@ export const OWNER_ATTEMPT_LIMIT = 5;
 const STORE_RETRIES = 3;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const TOKEN_PART_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+
+type OAuthStorageStage = "read_get" | "read_response" | "read_parse" | "write_validate" | "write_put" | "cas_exhausted";
+type OAuthStorageErrorKind = "access_denied" | "blob_not_found" | "precondition_failed" | "request_aborted"
+  | "service_unavailable" | "rate_limited" | "store_not_found" | "store_suspended" | "blob_unknown" | "unknown";
+
+interface OAuthStorageDiagnostic {
+  event: "oauth_storage_failure";
+  stage: OAuthStorageStage;
+  error_kind: OAuthStorageErrorKind;
+}
+
+type OAuthStorageDiagnosticSink = (diagnostic: OAuthStorageDiagnostic) => void;
 
 export interface AuthorizationRequest {
   clientId: string;
@@ -272,6 +296,23 @@ function isCasConflict(error: unknown): boolean {
   return /precondition|already exists|conflict|\b409\b|\b412\b/iu.test(message);
 }
 
+function classifyBlobError(error: unknown): OAuthStorageErrorKind {
+  if (error instanceof BlobAccessError) return "access_denied";
+  if (error instanceof BlobNotFoundError) return "blob_not_found";
+  if (error instanceof BlobPreconditionFailedError) return "precondition_failed";
+  if (error instanceof BlobRequestAbortedError) return "request_aborted";
+  if (error instanceof BlobServiceNotAvailable) return "service_unavailable";
+  if (error instanceof BlobServiceRateLimited) return "rate_limited";
+  if (error instanceof BlobStoreNotFoundError) return "store_not_found";
+  if (error instanceof BlobStoreSuspendedError) return "store_suspended";
+  if (error instanceof BlobUnknownError) return "blob_unknown";
+  return "unknown";
+}
+
+const defaultOAuthStorageDiagnosticSink: OAuthStorageDiagnosticSink = (diagnostic) => {
+  console.error(diagnostic);
+};
+
 const defaultBlobAdapter: OAuthBlobAdapter = {
   get: (pathname, options) => get(pathname, options),
   put: (pathname, body, options) => put(pathname, body, options),
@@ -282,22 +323,45 @@ export class BlobOAuthStore implements OAuthStateStore {
     private readonly blob: OAuthBlobAdapter = defaultBlobAdapter,
     private readonly tokenProvider: () => string = blobToken,
     private readonly nowProvider: () => number = Date.now,
+    private readonly diagnosticSink: OAuthStorageDiagnosticSink = defaultOAuthStorageDiagnosticSink,
   ) {}
 
+  private reportStorageFailure(stage: OAuthStorageStage, error: unknown): void {
+    this.diagnosticSink({ event: "oauth_storage_failure", stage, error_kind: classifyBlobError(error) });
+  }
+
   private async snapshot(): Promise<{ state: OAuthState; etag: string | null; exists: boolean }> {
+    let result: OAuthBlobGetResult | null;
     try {
-      const result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: this.tokenProvider() });
-      if (!result) return { state: emptyOAuthState(), etag: null, exists: false };
-      if (result.statusCode !== 200 || !result.stream || typeof result.blob.size !== "number"
-        || result.blob.size > OAUTH_STATE_MAX_BYTES) throw new OAuthStorageError();
-      const text = await new Response(result.stream).text();
-      const state = parseOAuthState(text);
-      pruneState(state, this.nowProvider());
-      return { state, etag: result.blob.etag || null, exists: true };
+      result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: this.tokenProvider() });
     } catch (error) {
+      this.reportStorageFailure("read_get", error);
       if (error instanceof OAuthStorageError) throw error;
       throw new OAuthStorageError();
     }
+    if (!result) return { state: emptyOAuthState(), etag: null, exists: false };
+    if (result.statusCode !== 200 || !result.stream || typeof result.blob.size !== "number"
+      || result.blob.size > OAUTH_STATE_MAX_BYTES) {
+      this.reportStorageFailure("read_response", undefined);
+      throw new OAuthStorageError();
+    }
+    let text: string;
+    try {
+      text = await new Response(result.stream).text();
+    } catch (error) {
+      this.reportStorageFailure("read_response", error);
+      throw new OAuthStorageError();
+    }
+    let state: OAuthState;
+    try {
+      state = parseOAuthState(text);
+    } catch (error) {
+      this.reportStorageFailure("read_parse", error);
+      if (error instanceof OAuthStorageError) throw error;
+      throw new OAuthStorageError();
+    }
+    pruneState(state, this.nowProvider());
+    return { state, etag: result.blob.etag || null, exists: true };
   }
 
   async read(): Promise<OAuthState> {
@@ -311,9 +375,16 @@ export class BlobOAuthStore implements OAuthStateStore {
       pruneState(state, this.nowProvider());
       const result = mutator(state);
       if (!result.commit) return result.value;
-      ensureStateCapacity(state);
-      const body = JSON.stringify(state);
-      parseOAuthState(body);
+      let body: string;
+      try {
+        ensureStateCapacity(state);
+        body = JSON.stringify(state);
+        parseOAuthState(body);
+      } catch (error) {
+        this.reportStorageFailure("write_validate", error);
+        if (error instanceof OAuthStorageError) throw error;
+        throw new OAuthStorageError();
+      }
       try {
         await this.blob.put(OAUTH_STATE_PATH, body, {
           access: "private",
@@ -326,7 +397,9 @@ export class BlobOAuthStore implements OAuthStateStore {
         });
         return result.value;
       } catch (error) {
-        if (isCasConflict(error) && attempt + 1 < STORE_RETRIES) continue;
+        const casConflict = isCasConflict(error);
+        if (casConflict && attempt + 1 < STORE_RETRIES) continue;
+        this.reportStorageFailure(casConflict ? "cas_exhausted" : "write_put", error);
         throw new OAuthStorageError();
       }
     }
