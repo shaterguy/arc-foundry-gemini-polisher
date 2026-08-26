@@ -17,7 +17,7 @@ test("framework-free health function returns only safe service metadata", async 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     name: "arc-foundry-gemini-polisher",
-    version: "0.1.0-dev5",
+    version: "0.1.0-dev6",
     status: "ok",
   });
 });
@@ -44,10 +44,12 @@ test("protected resource metadata binds the canonical /mcp resource", async () =
 test("Vercel exposes only the RFC 9728 path-derived protected-resource metadata route", () => {
   const config = JSON.parse(readFileSync(new URL("../vercel.json", import.meta.url), "utf8")) as {
     rewrites: Array<{ source: string }>;
+    functions: Record<string, { maxDuration: number }>;
   };
   const sources = config.rewrites.map((rewrite) => rewrite.source);
   assert.equal(sources.includes(OAUTH_RESOURCE_METADATA_PATH), true);
   assert.equal(sources.includes("/.well-known/oauth-protected-resource"), false);
+  assert.equal(config.functions["api/server.ts"]?.maxDuration, 300);
 });
 
 test("MCP function fails closed when OAuth runtime secrets are missing", async () => {
