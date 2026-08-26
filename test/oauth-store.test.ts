@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BlobAccessError, BlobServiceNotAvailable } from "@vercel/blob";
+import { BlobAccessError, BlobNotFoundError, BlobServiceNotAvailable } from "@vercel/blob";
 import {
   ACCESS_TOKEN_TTL_MS,
   BlobOAuthStore,
@@ -42,8 +42,15 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
   private etagVersion = 0;
   private conflicts = 0;
   private barrier: ReadBarrier | null = null;
+  private headFailure: unknown | undefined;
   private getFailure: unknown | undefined;
   private putFailure: unknown | undefined;
+  private headEtagOverride: string | undefined;
+  private getEtagOverride: string | undefined;
+  private afterHead: (() => void) | null = null;
+  private afterGet: (() => void) | null = null;
+  private puts = 0;
+  private seenTokens: string[] = [];
 
   seed(body: string): void {
     this.body = body;
@@ -54,8 +61,20 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
     return this.body;
   }
 
+  putCount(): number {
+    return this.puts;
+  }
+
+  tokens(): string[] {
+    return [...this.seenTokens];
+  }
+
   forceConflicts(count: number): void {
     this.conflicts = count;
+  }
+
+  failNextHead(error: unknown): void {
+    this.headFailure = error;
   }
 
   failNextGet(error: unknown): void {
@@ -64,6 +83,29 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
 
   failNextPut(error: unknown): void {
     this.putFailure = error;
+  }
+
+  overrideNextHeadEtag(etag: string): void {
+    this.headEtagOverride = etag;
+  }
+
+  overrideNextGetEtag(etag: string): void {
+    this.getEtagOverride = etag;
+  }
+
+  writeAfterNextHead(body: string): void {
+    this.afterHead = () => this.seed(body);
+  }
+
+  deleteAfterNextHead(): void {
+    this.afterHead = () => {
+      this.body = null;
+      this.etagVersion += 1;
+    };
+  }
+
+  writeAfterNextGet(body: string): void {
+    this.afterGet = () => this.seed(body);
   }
 
   synchronizeNextReads(count: number): void {
@@ -76,14 +118,33 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
     return `etag-${this.etagVersion}`;
   }
 
-  async get(_pathname: string, _options: { access: "private"; useCache: boolean; token: string }): Promise<OAuthBlobGetResult | null> {
+  async head(_pathname: string, options: { token: string }): Promise<{ etag: string }> {
+    this.seenTokens.push(options.token);
+    if (this.headFailure !== undefined) {
+      const failure = this.headFailure;
+      this.headFailure = undefined;
+      throw failure;
+    }
+    const exists = this.body !== null;
+    const etag = this.headEtagOverride !== undefined ? this.headEtagOverride : this.etag();
+    this.headEtagOverride = undefined;
+    const afterHead = this.afterHead;
+    this.afterHead = null;
+    afterHead?.();
+    if (!exists) throw new BlobNotFoundError();
+    return { etag };
+  }
+
+  async get(_pathname: string, options: { access: "private"; useCache: boolean; token: string }): Promise<OAuthBlobGetResult | null> {
+    this.seenTokens.push(options.token);
     if (this.getFailure !== undefined) {
       const failure = this.getFailure;
       this.getFailure = undefined;
       throw failure;
     }
     const snapshotBody = this.body;
-    const snapshotEtag = this.etag();
+    const snapshotEtag = this.getEtagOverride !== undefined ? this.getEtagOverride : this.etag();
+    this.getEtagOverride = undefined;
     const barrier = this.barrier;
     if (barrier && barrier.remaining > 0) {
       barrier.remaining -= 1;
@@ -91,6 +152,9 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
       await barrier.promise;
       if (barrier.remaining === 0) this.barrier = null;
     }
+    const afterGet = this.afterGet;
+    this.afterGet = null;
+    afterGet?.();
     if (snapshotBody === null) return null;
     return {
       statusCode: 200,
@@ -108,6 +172,8 @@ class FakeBlobAdapter implements OAuthBlobAdapter {
     cacheControlMaxAge: number;
     token: string;
   }): Promise<unknown> {
+    this.seenTokens.push(options.token);
+    this.puts += 1;
     if (this.putFailure !== undefined) {
       const failure = this.putFailure;
       this.putFailure = undefined;
@@ -183,6 +249,113 @@ test("Blob store resolves simultaneous initial creation through CAS retry withou
   const state = await store.read();
   assert.equal(Object.hasOwn(state.ownerFailures, keyA), true);
   assert.equal(Object.hasOwn(state.ownerFailures, keyB), true);
+});
+
+test("Blob store uses control-plane head ETag and one token per write attempt", async () => {
+  const adapter = new FakeBlobAdapter();
+  adapter.seed(JSON.stringify(emptyOAuthState()));
+  adapter.overrideNextGetEtag("data-plane-etag-that-put-would-reject");
+  let tokenCalls = 0;
+  const store = new BlobOAuthStore(adapter, () => {
+    tokenCalls += 1;
+    return "stable-write-token";
+  }, Date.now, () => {});
+  const now = Date.now();
+  const key = hashOpaque("head-etag-recovery");
+
+  await store.transact((state) => {
+    state.ownerFailures[key] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  });
+
+  assert.equal(tokenCalls, 1);
+  assert.deepEqual(adapter.tokens(), ["stable-write-token", "stable-write-token", "stable-write-token"]);
+  assert.equal(Object.hasOwn(JSON.parse(adapter.rawBody() ?? "{}").ownerFailures, key), true);
+});
+
+test("Blob store preserves concurrent state when writers interleave after head or get", async () => {
+  for (const interleave of ["after-head", "after-get"] as const) {
+    const { adapter, store } = storeWith();
+    adapter.seed(JSON.stringify(emptyOAuthState()));
+    const now = Date.now();
+    const concurrentKey = hashOpaque(`concurrent-${interleave}`);
+    const targetKey = hashOpaque(`target-${interleave}`);
+    const concurrent = emptyOAuthState();
+    concurrent.ownerFailures[concurrentKey] = { count: 1, expiresAt: now + 60_000 };
+    if (interleave === "after-head") adapter.writeAfterNextHead(JSON.stringify(concurrent));
+    else adapter.writeAfterNextGet(JSON.stringify(concurrent));
+    let mutatorCalls = 0;
+
+    await store.transact((state) => {
+      mutatorCalls += 1;
+      state.ownerFailures[targetKey] = { count: 1, expiresAt: now + 60_000 };
+      return { value: undefined, commit: true };
+    });
+
+    const state = await store.read();
+    assert.equal(mutatorCalls, 2);
+    assert.equal(Object.hasOwn(state.ownerFailures, concurrentKey), true);
+    assert.equal(Object.hasOwn(state.ownerFailures, targetKey), true);
+  }
+});
+
+test("Blob store retries head/get existence disagreement before mutating or writing", async () => {
+  const now = Date.now();
+
+  const createdBetween = storeWith();
+  const concurrent = emptyOAuthState();
+  const concurrentKey = hashOpaque("created-between-head-get");
+  concurrent.ownerFailures[concurrentKey] = { count: 1, expiresAt: now + 60_000 };
+  createdBetween.adapter.writeAfterNextHead(JSON.stringify(concurrent));
+  let firstMutatorCalls = 0;
+  await createdBetween.store.transact((state) => {
+    firstMutatorCalls += 1;
+    state.ownerFailures[hashOpaque("after-created-between")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  });
+  assert.equal(firstMutatorCalls, 1);
+  assert.equal(createdBetween.adapter.putCount(), 1);
+  assert.equal(Object.hasOwn((await createdBetween.store.read()).ownerFailures, concurrentKey), true);
+
+  const deletedBetween = storeWith();
+  deletedBetween.adapter.seed(JSON.stringify(emptyOAuthState()));
+  deletedBetween.adapter.deleteAfterNextHead();
+  let secondMutatorCalls = 0;
+  await deletedBetween.store.transact((state) => {
+    secondMutatorCalls += 1;
+    state.ownerFailures[hashOpaque("after-deleted-between")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  });
+  assert.equal(secondMutatorCalls, 1);
+  assert.equal(deletedBetween.adapter.putCount(), 1);
+});
+
+test("Blob store fails closed on non-notfound head errors and empty existing ETag", async () => {
+  const now = Date.now();
+
+  const headFailure = storeWith();
+  headFailure.adapter.seed(JSON.stringify(emptyOAuthState()));
+  headFailure.adapter.failNextHead(new BlobServiceNotAvailable());
+  let headFailureMutatorCalls = 0;
+  await assert.rejects(headFailure.store.transact((state) => {
+    headFailureMutatorCalls += 1;
+    state.ownerFailures[hashOpaque("head-error")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  }), OAuthStorageError);
+  assert.equal(headFailureMutatorCalls, 0);
+  assert.equal(headFailure.adapter.putCount(), 0);
+
+  const emptyEtag = storeWith();
+  emptyEtag.adapter.seed(JSON.stringify(emptyOAuthState()));
+  emptyEtag.adapter.overrideNextHeadEtag("");
+  let emptyEtagMutatorCalls = 0;
+  await assert.rejects(emptyEtag.store.transact((state) => {
+    emptyEtagMutatorCalls += 1;
+    state.ownerFailures[hashOpaque("empty-etag")] = { count: 1, expiresAt: now + 60_000 };
+    return { value: undefined, commit: true };
+  }), OAuthStorageError);
+  assert.equal(emptyEtagMutatorCalls, 0);
+  assert.equal(emptyEtag.adapter.putCount(), 0);
 });
 
 test("Blob store retries ifMatch conflict and fails closed after retry exhaustion", async () => {

@@ -10,6 +10,7 @@ import {
   BlobStoreSuspendedError,
   BlobUnknownError,
   get,
+  head as blobHead,
   put,
 } from "@vercel/blob";
 
@@ -112,7 +113,12 @@ export interface OAuthBlobGetResult {
   };
 }
 
+export interface OAuthBlobHeadResult {
+  etag: string;
+}
+
 export interface OAuthBlobAdapter {
+  head(pathname: string, options: { token: string }): Promise<OAuthBlobHeadResult>;
   get(pathname: string, options: { access: "private"; useCache: boolean; token: string }): Promise<OAuthBlobGetResult | null>;
   put(pathname: string, body: string, options: {
     access: "private";
@@ -314,6 +320,7 @@ const defaultOAuthStorageDiagnosticSink: OAuthStorageDiagnosticSink = (diagnosti
 };
 
 const defaultBlobAdapter: OAuthBlobAdapter = {
+  head: (pathname, options) => blobHead(pathname, options),
   get: (pathname, options) => get(pathname, options),
   put: (pathname, body, options) => put(pathname, body, options),
 };
@@ -330,16 +337,26 @@ export class BlobOAuthStore implements OAuthStateStore {
     this.diagnosticSink({ event: "oauth_storage_failure", stage, error_kind: classifyBlobError(error) });
   }
 
-  private async snapshot(): Promise<{ state: OAuthState; etag: string | null; exists: boolean }> {
-    let result: OAuthBlobGetResult | null;
+  private storageToken(): string {
     try {
-      result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token: this.tokenProvider() });
+      return this.tokenProvider();
     } catch (error) {
       this.reportStorageFailure("read_get", error);
       if (error instanceof OAuthStorageError) throw error;
       throw new OAuthStorageError();
     }
-    if (!result) return { state: emptyOAuthState(), etag: null, exists: false };
+  }
+
+  private async snapshot(token: string): Promise<{ state: OAuthState; exists: boolean }> {
+    let result: OAuthBlobGetResult | null;
+    try {
+      result = await this.blob.get(OAUTH_STATE_PATH, { access: "private", useCache: false, token });
+    } catch (error) {
+      this.reportStorageFailure("read_get", error);
+      if (error instanceof OAuthStorageError) throw error;
+      throw new OAuthStorageError();
+    }
+    if (!result) return { state: emptyOAuthState(), exists: false };
     if (result.statusCode !== 200 || !result.stream || typeof result.blob.size !== "number"
       || result.blob.size > OAUTH_STATE_MAX_BYTES) {
       this.reportStorageFailure("read_response", undefined);
@@ -361,16 +378,46 @@ export class BlobOAuthStore implements OAuthStateStore {
       throw new OAuthStorageError();
     }
     pruneState(state, this.nowProvider());
-    return { state, etag: result.blob.etag || null, exists: true };
+    return { state, exists: true };
+  }
+
+  private async writeSnapshot(token: string): Promise<{ state: OAuthState; etag: string | null; exists: boolean } | null> {
+    let headExists = true;
+    let headEtag: string | null = null;
+    try {
+      const metadata = await this.blob.head(OAUTH_STATE_PATH, { token });
+      headEtag = metadata.etag || null;
+    } catch (error) {
+      if (error instanceof BlobNotFoundError) {
+        headExists = false;
+      } else {
+        this.reportStorageFailure("read_get", error);
+        if (error instanceof OAuthStorageError) throw error;
+        throw new OAuthStorageError();
+      }
+    }
+    if (headExists && !headEtag) {
+      this.reportStorageFailure("read_response", undefined);
+      throw new OAuthStorageError();
+    }
+    const snapshot = await this.snapshot(token);
+    if (snapshot.exists !== headExists) return null;
+    return { state: snapshot.state, etag: headEtag, exists: headExists };
   }
 
   async read(): Promise<OAuthState> {
-    return (await this.snapshot()).state;
+    return (await this.snapshot(this.storageToken())).state;
   }
 
   async transact<T>(mutator: (state: OAuthState) => StateTransaction<T>): Promise<T> {
     for (let attempt = 0; attempt < STORE_RETRIES; attempt += 1) {
-      const snapshot = await this.snapshot();
+      const token = this.storageToken();
+      const snapshot = await this.writeSnapshot(token);
+      if (!snapshot) {
+        if (attempt + 1 < STORE_RETRIES) continue;
+        this.reportStorageFailure("cas_exhausted", undefined);
+        throw new OAuthStorageError();
+      }
       const state = structuredClone(snapshot.state);
       pruneState(state, this.nowProvider());
       const result = mutator(state);
@@ -390,10 +437,10 @@ export class BlobOAuthStore implements OAuthStateStore {
           access: "private",
           addRandomSuffix: false,
           allowOverwrite: snapshot.exists,
-          ...(snapshot.exists && snapshot.etag ? { ifMatch: snapshot.etag } : {}),
+          ...(snapshot.exists ? { ifMatch: snapshot.etag! } : {}),
           contentType: "application/json",
           cacheControlMaxAge: 60,
-          token: this.tokenProvider(),
+          token,
         });
         return result.value;
       } catch (error) {
