@@ -1,14 +1,16 @@
 # Arc Foundry Gemini Polisher MCP
 
-A Vercel-only remote MCP server for the final Korean-language copyediting stage of Arc Foundry novels.
+A Vercel-only remote MCP server for the final Korean-language literary rewrite stage of Arc Foundry novels.
 
 ## Contract
 
-This server runs only after **FINAL CONTENT LOCK**. Gemini has no narrative authority. It may improve Korean word order, sentence structure/rhythm, translationese, particles/connectors, repetitive endings, redundant phrasing, modifier relationships, spelling, spacing, punctuation, and awkward Korean novel phrasing.
+This server runs only after **FINAL CONTENT LOCK**. Gemini has no narrative authority, but it has broad authority over Korean surface expression inside each existing scene. It may substantially restructure word order, sentences, clauses, and paragraph boundaries; merge or split sentences and paragraphs; remove mechanical subject/pronoun/connector repetition; recast nominalizations and modifier chains; vary repetitive endings; remove translationese and redundant phrasing; improve literary rhythm and breath; and correct spelling, spacing, and punctuation.
 
-It must not change events, scene order, setting/worldbuilding, character actions or intent, relationships, dialogue meaning, emotional meaning/intensity, POV, tense, proper nouns, numbers, dates, factual relationships, foreshadowing, or add/delete narrative information.
+The goal is meaning-preserving literary rewriting, not typo-level proofreading. Gemini should not preserve awkward source sentence boundaries merely because they exist, and should leave already-natural prose alone rather than changing it gratuitously.
 
-The tool never writes to Google Drive. It returns an accepted polished candidate only after deterministic protected-value/position checks and a separate semantic-preservation validation. Any provider/configuration/validation failure returns the exact locked source as `fallback_original`.
+It must not change events, scene order, setting/worldbuilding, character actions or intent, relationships, dialogue meaning, emotional meaning/intensity, POV, tense, proper-noun identity, numbers, dates, factual relationships, foreshadowing, or add/delete meaningful narrative information. It must not invent description, implication, motivation, chronology, sensory detail, or facts absent from the source.
+
+The tool never writes to Google Drive. It returns an accepted rewritten candidate only after deterministic protected-value/scene checks and a separate Gemini validation that independently judges semantic preservation and rewrite adequacy. Any provider/configuration/validation failure returns the exact locked source as `fallback_original`.
 
 ## MCP tool
 
@@ -19,10 +21,12 @@ Default unit: one Arc Foundry episode. If a caller must split a long episode, sp
 Important inputs:
 - `locked_text`: exact FINAL CONTENT LOCK source.
 - `protected_manifest`: required manifest with `source: "arc-foundry-final-lock"` and a non-empty unique `terms` list assembled from the authoritative Arc Foundry final-lock ledgers. Missing or malformed manifests fail closed.
-- `style_rules`: optional read-only Arc Foundry style rules.
+- `style_rules`: optional read-only Arc Foundry style rules. They may guide surface expression but never override narrative meaning or protected facts.
 - `before_context`, `after_context`: optional read-only context.
 
-The server derives immutable line block IDs from `locked_text`. Blank lines and explicit scene separators are copied from the locked source, not generated. Gemini may only return replacement text for existing editable block IDs in the exact original order; block addition, deletion, reordering, splitting, merging, or embedded newlines are rejected before semantic validation.
+The server derives immutable scene block IDs from `locked_text`. A scene block is the text between explicit scene-separator lines such as `***`, `---`, or equivalent separators. Gemini may freely restructure sentence and paragraph boundaries inside an existing scene block, including embedded newlines. The existing scene blocks, their order, and separator sequence are immutable; block addition, deletion, or reordering is rejected before semantic validation. Deterministic validation also preserves the numeric/date token sequence and requires protected terms present in the locked source to retain their exact identity, while allowing redundant repeated mentions to be reduced when meaning remains intact.
+
+The semantic validator explicitly permits substantial rewriting and rejects only narrative or factual drift. In the same validation call it separately decides whether the source actually needed rewriting and, if so, whether the candidate materially improved Korean naturalness, syntax, rhythm, and literary readability beyond spelling/particle-level edits. An inadequate but meaning-preserving candidate is retried from the locked source. Already-natural source text does not need gratuitous change.
 
 ## Runtime and secrets
 
@@ -30,7 +34,7 @@ Hosting, OAuth endpoints, MCP runtime, and OAuth persistence are Vercel-only. Fr
 
 `mcp-handler` declares Next.js as an optional peer for users who mount it in Next.js. This project does not use that integration. Vercel and CI both run `npm ci --omit=peer`, and CI explicitly fails if `next`, `react`, or `react-dom` appears in the installed runtime tree. Required MCP/Zod packages and the Vercel Blob client remain exact pinned dependencies.
 
-Manuscript processing is stateless. The only persistent application state is OAuth transactional metadata in a **Private Vercel Blob** object (`oauth/state-v2.json`). Authorization codes and access tokens are persisted only by SHA-256 hash with binding/expiry metadata. Each refresh family stores only its current token hash and generation; older refresh tokens are not accumulated. Refresh tokens carry only random family/generation material plus a random secret and an HMAC integrity tag, so any authentic stale generation can revoke the family without persisting plaintext or an unbounded spent-token ledger. Raw manuscript/candidate text, adjacent context, protected manifests, Gemini request/response content, owner credentials, and OAuth token plaintext are never written to Blob by application code. Raw manuscript/candidate text is not logged by application code. Gemini polish and semantic-validation requests use GenerateContent with `store: false`.
+Manuscript processing is stateless. The only persistent application state is OAuth transactional metadata in a **Private Vercel Blob** object (`oauth/state-v2.json`). Authorization codes and access tokens are persisted only by SHA-256 hash with binding/expiry metadata. Each refresh family stores only its current token hash and generation; older refresh tokens are not accumulated. Refresh tokens carry only random family/generation material plus a random secret and an HMAC integrity tag, so any authentic stale generation can revoke the family without persisting plaintext or an unbounded spent-token ledger. Raw manuscript/candidate text, adjacent context, protected manifests, Gemini request/response content, owner credentials, and OAuth token plaintext are never written to Blob by application code. Raw manuscript/candidate text is not logged by application code. Gemini rewrite and semantic/adequacy-validation requests use GenerateContent with `store: false`.
 
 Configure secrets only as Vercel environment variables:
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
@@ -78,4 +82,4 @@ CI performs the same checks on the development branch and verifies that Next.js/
 
 The MCP tool is read-only and non-destructive because it transforms caller-provided text and has no external write side effect. Tool metadata advertises OAuth scope `polish:invoke`; the resource server independently validates access-token resource, scope, expiry, client, and refresh-family revocation before MCP execution.
 
-Operational compatibility is not assumed from unit tests alone. Release verification must connect the deployed endpoint through ChatGPT OAuth, complete tool discovery/Scan Tools, invoke `polish_korean_novel_final`, and confirm both successful Gemini polishing and exact locked-source fallback behavior before Arc Foundry treats the integration as operational.
+Operational compatibility is not assumed from unit tests alone. Release verification must connect the deployed endpoint through ChatGPT OAuth, complete tool discovery/Scan Tools, invoke `polish_korean_novel_final`, and confirm both successful Gemini literary rewriting and exact locked-source fallback behavior before Arc Foundry treats the integration as operational.

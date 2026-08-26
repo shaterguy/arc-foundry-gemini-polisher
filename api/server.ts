@@ -14,10 +14,10 @@ import { polishLockedText } from "../lib/polisher.js";
 import { PROTECTED_MANIFEST_SOURCE } from "../lib/types.js";
 
 const inputSchema = z.object({
-  locked_text: z.string().min(1).max(120_000).describe("Exact FINAL CONTENT LOCK text to polish"),
+  locked_text: z.string().min(1).max(120_000).describe("Exact FINAL CONTENT LOCK text to rewrite without changing narrative meaning"),
   before_context: z.string().max(30_000).optional().describe("Read-only context before the target"),
   after_context: z.string().max(30_000).optional().describe("Read-only context after the target"),
-  style_rules: z.string().max(20_000).optional().describe("Read-only Arc Foundry style rules"),
+  style_rules: z.string().max(20_000).optional().describe("Read-only Arc Foundry style rules for surface expression only"),
   protected_manifest: z.object({
     source: z.literal(PROTECTED_MANIFEST_SOURCE),
     terms: z.array(z.string().trim().min(1).max(100)).min(1).max(500),
@@ -36,6 +36,7 @@ const outputSchema = z.object({
   validation: z.object({
     deterministic_passed: z.boolean(),
     semantic_passed: z.boolean(),
+    rewrite_adequacy_passed: z.boolean(),
     violations: z.array(z.string()),
   }).strict(),
 }).strict();
@@ -44,8 +45,8 @@ const mcpHandler = createMcpHandler((server) => {
   server.registerTool(
     "polish_korean_novel_final",
     {
-      title: "Polish Korean Novel After Final Content Lock",
-      description: "Surface-level Korean novel copyediting after FINAL CONTENT LOCK. Never changes narrative authority; rejected or failed candidates fall back to the exact locked source.",
+      title: "Rewrite Korean Novel After Final Content Lock",
+      description: "Meaning-preserving Korean literary rewrite after FINAL CONTENT LOCK. May substantially restructure sentences and paragraphs within existing scenes while preserving narrative authority; rejected or failed candidates fall back to the exact locked source.",
       inputSchema,
       outputSchema,
       _meta: { securitySchemes: [{ type: "oauth2", scopes: [OAUTH_SCOPE] }] },
@@ -74,7 +75,7 @@ const mcpHandler = createMcpHandler((server) => {
     },
   );
 }, {
-  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev5" },
+  serverInfo: { name: "arc-foundry-gemini-polisher", version: "0.1.0-dev7" },
   verboseLogs: false,
 });
 

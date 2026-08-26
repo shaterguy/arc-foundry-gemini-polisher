@@ -11,11 +11,11 @@ const input: PolishInput = {
   unit_id: "episode-001",
 };
 
-function blocksFor(source: string, polishedLines: string[]): PolishedBlock[] {
+function blocksFor(source: string, polishedScenes: string[]): PolishedBlock[] {
   const layout = buildLockedLayout(source);
   return layout.editable_blocks.map((block, index) => ({
     block_id: block.block_id,
-    polished_text: polishedLines[index] ?? block.source_text,
+    polished_text: polishedScenes[index] ?? block.source_text,
   }));
 }
 
@@ -27,18 +27,26 @@ function provider(overrides: Partial<PolishProvider> = {}): PolishProvider {
       return blocksFor(input.locked_text, ["민재는 천천히 3층으로 올라갔다."]);
     },
     async validate() {
-      return { preserved: true, violations: [], summary: "preserved" };
+      return {
+        preserved: true,
+        violations: [],
+        summary: "preserved",
+        rewrite_needed: true,
+        rewrite_adequate: true,
+        adequacy_summary: "materially improved",
+      };
     },
     ...overrides,
   };
 }
 
-test("accepted candidate is returned only after deterministic and semantic checks", async () => {
+test("accepted candidate is returned only after deterministic semantic and adequacy checks", async () => {
   const result = await polishLockedText(input, provider(), { maxAttempts: 2 });
   assert.equal(result.status, "accepted");
   assert.equal(result.final_text, "민재는 천천히 3층으로 올라갔다.");
   assert.equal(result.validation.deterministic_passed, true);
   assert.equal(result.validation.semantic_passed, true);
+  assert.equal(result.validation.rewrite_adequacy_passed, true);
 });
 
 test("missing protected manifest fails closed before provider use", async () => {
@@ -71,9 +79,9 @@ test("deterministic violation retries from locked source and can recover", async
   assert.equal(result.attempts, 2);
 });
 
-test("reordered block manifest is rejected without semantic acceptance", async () => {
+test("reordered scene block manifest is rejected without semantic acceptance", async () => {
   const multi: PolishInput = {
-    locked_text: "민재가 말했다.\n수진이 답했다.",
+    locked_text: "민재가 말했다.\n***\n수진이 답했다.",
     protected_manifest: { source: "arc-foundry-final-lock", terms: ["민재", "수진"] },
   };
   const layout = buildLockedLayout(multi.locked_text);
@@ -98,6 +106,9 @@ test("semantic violation falls back to exact locked source", async () => {
         preserved: false,
         violations: [{ category: "character_intent", explanation: "intent changed" }],
         summary: "rejected",
+        rewrite_needed: true,
+        rewrite_adequate: true,
+        adequacy_summary: "surface improved",
       };
     },
   });
@@ -105,6 +116,66 @@ test("semantic violation falls back to exact locked source", async () => {
   assert.equal(result.status, "fallback_original");
   assert.equal(result.reason, "validation_failed");
   assert.equal(result.final_text, input.locked_text);
+  assert.equal(result.validation.semantic_passed, false);
+});
+
+test("rewrite inadequacy retries even when meaning is preserved", async () => {
+  let polishCalls = 0;
+  let validateCalls = 0;
+  const mock = provider({
+    async polish(received, rejectionNotes) {
+      polishCalls += 1;
+      if (polishCalls === 2) {
+        assert.ok(rejectionNotes.some((note) => note.startsWith("rewrite_adequacy:")));
+      }
+      return blocksFor(received.locked_text, [
+        polishCalls === 1
+          ? "민재는 3층으로 천천히 올라갔다."
+          : "민재는 천천히 3층으로 올라갔다.",
+      ]);
+    },
+    async validate() {
+      validateCalls += 1;
+      return {
+        preserved: true,
+        violations: [],
+        summary: "preserved",
+        rewrite_needed: true,
+        rewrite_adequate: validateCalls > 1,
+        adequacy_summary: validateCalls > 1 ? "materially improved" : "only surface-level changes",
+      };
+    },
+  });
+  const result = await polishLockedText(input, mock, { maxAttempts: 2 });
+  assert.equal(polishCalls, 2);
+  assert.equal(validateCalls, 2);
+  assert.equal(result.status, "accepted");
+  assert.equal(result.attempts, 2);
+});
+
+test("already-natural source does not require gratuitous rewriting", async () => {
+  const natural: PolishInput = {
+    locked_text: "비가 그친 골목에는 젖은 흙냄새가 남아 있었다.",
+    protected_manifest: { source: "arc-foundry-final-lock", terms: ["골목"] },
+  };
+  const mock = provider({
+    async polish(received) {
+      return blocksFor(received.locked_text, [received.locked_text]);
+    },
+    async validate() {
+      return {
+        preserved: true,
+        violations: [],
+        summary: "preserved",
+        rewrite_needed: false,
+        rewrite_adequate: true,
+        adequacy_summary: "already natural",
+      };
+    },
+  });
+  const result = await polishLockedText(natural, mock, { maxAttempts: 1 });
+  assert.equal(result.status, "accepted");
+  assert.equal(result.final_text, natural.locked_text);
 });
 
 test("provider failure falls back to exact locked source with sanitized status", async () => {

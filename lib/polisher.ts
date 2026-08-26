@@ -15,6 +15,7 @@ function fallback(
   attempts: number,
   deterministicPassed: boolean,
   semanticPassed: boolean,
+  rewriteAdequacyPassed: boolean,
   violations: string[],
 ): PolishResult {
   return {
@@ -28,6 +29,7 @@ function fallback(
     validation: {
       deterministic_passed: deterministicPassed,
       semantic_passed: semanticPassed,
+      rewrite_adequacy_passed: rewriteAdequacyPassed,
       violations,
     },
   };
@@ -62,12 +64,12 @@ export async function polishLockedText(
   const runtimeModels = getRuntimeModels();
   const protectedTerms = protectedTermsOrNull(input);
   if (!protectedTerms) {
-    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, ["protected manifest missing or invalid"]);
+    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, false, ["protected manifest missing or invalid"]);
   }
 
   const layout = buildLockedLayout(input.locked_text);
   if (layout.editable_blocks.length === 0) {
-    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, ["locked source has no editable blocks"]);
+    return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, false, ["locked source has no editable blocks"]);
   }
 
   let activeProvider = provider;
@@ -75,7 +77,7 @@ export async function polishLockedText(
     try {
       activeProvider = createGeminiProvider();
     } catch {
-      return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, ["provider configuration unavailable"]);
+      return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, false, ["provider configuration unavailable"]);
     }
   }
 
@@ -84,6 +86,7 @@ export async function polishLockedText(
   let latestViolations: string[] = [];
   let deterministicPassed = false;
   let semanticPassed = false;
+  let rewriteAdequacyPassed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let candidate: string;
@@ -99,7 +102,7 @@ export async function polishLockedText(
         rejectionNotes = latestViolations;
         continue;
       }
-      return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, false, false, [message]);
+      return fallback(input, "provider_failure", activeProvider.model, activeProvider.validatorModel, attempt, false, false, false, [message]);
     }
 
     const deterministic = validateDeterministic(input.locked_text, candidate, protectedTerms);
@@ -112,7 +115,7 @@ export async function polishLockedText(
 
     let semantic;
     try {
-      semantic = await activeProvider.validate(input.locked_text, candidate, protectedTerms);
+      semantic = await activeProvider.validate(input.locked_text, candidate, protectedTerms, input.style_rules);
     } catch (error) {
       return fallback(
         input,
@@ -122,13 +125,22 @@ export async function polishLockedText(
         attempt,
         true,
         false,
+        false,
         [`Gemini validation request failed: ${providerFailureCode(error)}`],
       );
     }
 
     semanticPassed = semantic.preserved && semantic.violations.length === 0;
+    rewriteAdequacyPassed = semantic.rewrite_needed ? semantic.rewrite_adequate : true;
+
     if (!semanticPassed) {
       latestViolations = semantic.violations.map((item) => `${item.category}: ${item.explanation}`);
+      rejectionNotes = latestViolations;
+      continue;
+    }
+
+    if (!rewriteAdequacyPassed) {
+      latestViolations = [`rewrite_adequacy: ${semantic.adequacy_summary || "candidate remained too close to the mechanical source"}`];
       rejectionNotes = latestViolations;
       continue;
     }
@@ -144,10 +156,21 @@ export async function polishLockedText(
       validation: {
         deterministic_passed: true,
         semantic_passed: true,
+        rewrite_adequacy_passed: true,
         violations: [],
       },
     };
   }
 
-  return fallback(input, "validation_failed", activeProvider.model, activeProvider.validatorModel, maxAttempts, deterministicPassed, semanticPassed, latestViolations);
+  return fallback(
+    input,
+    "validation_failed",
+    activeProvider.model,
+    activeProvider.validatorModel,
+    maxAttempts,
+    deterministicPassed,
+    semanticPassed,
+    rewriteAdequacyPassed,
+    latestViolations,
+  );
 }

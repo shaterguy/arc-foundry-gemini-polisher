@@ -13,13 +13,45 @@ const input: PolishInput = {
   protected_manifest: { source: "arc-foundry-final-lock", terms: ["민재"] },
 };
 
+const acceptedValidation = {
+  preserved: true,
+  violations: [],
+  summary: "preserved",
+  rewrite_needed: false,
+  rewrite_adequate: true,
+  adequacy_summary: "already natural",
+};
+
 test("GenerateContent request always sets top-level store=false", () => {
   const body = buildGenerateContentRequest("system", "prompt", { type: "object" });
   assert.equal(body.store, false);
   assert.equal(body.generationConfig.responseMimeType, "application/json");
 });
 
-test("both polish and semantic validation calls transmit store=false", async () => {
+test("polish request explicitly permits literary restructuring instead of mere proofreading", async () => {
+  const oldKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
+  let seenBody: Record<string, unknown> | undefined;
+  const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    seenBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    const text = JSON.stringify({ polished_blocks: [{ block_id: "S000000", polished_text: "민재는 문을 열었다." }] });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), { status: 200 });
+  };
+
+  try {
+    const provider = createGeminiProvider(fetchMock);
+    await provider.polish(input, []);
+    const systemInstruction = seenBody?.systemInstruction as { parts?: Array<{ text?: string }> } | undefined;
+    const systemText = systemInstruction?.parts?.map((part) => part.text ?? "").join("") ?? "";
+    assert.match(systemText, /NOT mere proofreading/u);
+    assert.match(systemText, /splitting or merging sentences and paragraphs/u);
+    assert.match(systemText, /Do not preserve source sentence boundaries/u);
+  } finally {
+    restoreEnv("GEMINI_API_KEY", oldKey);
+  }
+});
+
+test("both polish and dual validation calls transmit store=false", async () => {
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
   const seenBodies: Array<Record<string, unknown>> = [];
@@ -29,8 +61,8 @@ test("both polish and semantic validation calls transmit store=false", async () 
     seenBodies.push(body);
     call += 1;
     const text = call === 1
-      ? JSON.stringify({ polished_blocks: [{ block_id: "L000000", polished_text: "민재는 문을 열었다." }] })
-      : JSON.stringify({ preserved: true, violations: [], summary: "preserved" });
+      ? JSON.stringify({ polished_blocks: [{ block_id: "S000000", polished_text: "민재는 문을 열었다." }] })
+      : JSON.stringify(acceptedValidation);
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -40,9 +72,14 @@ test("both polish and semantic validation calls transmit store=false", async () 
   try {
     const provider = createGeminiProvider(fetchMock);
     await provider.polish(input, []);
-    await provider.validate(input.locked_text, input.locked_text, input.protected_manifest.terms);
+    const validation = await provider.validate(input.locked_text, input.locked_text, input.protected_manifest.terms, "자연스러운 한국어");
     assert.equal(seenBodies.length, 2);
     assert.ok(seenBodies.every((body) => body.store === false));
+    assert.equal(validation.rewrite_adequate, true);
+    const validationPrompt = ((seenBodies[1]?.contents as Array<{ parts?: Array<{ text?: string }> }> | undefined)?.[0]?.parts ?? [])
+      .map((part) => part.text ?? "")
+      .join("");
+    assert.match(validationPrompt, /STYLE_RULES/u);
   } finally {
     restoreEnv("GEMINI_API_KEY", oldKey);
   }
@@ -67,7 +104,7 @@ test("transient primary model failure falls back to gemini-3.6-flash", async () 
     if (url.includes("gemini-3.7-flash")) {
       return new Response("", { status: 503 });
     }
-    const text = JSON.stringify({ polished_blocks: [{ block_id: "L000000", polished_text: "민재는 문을 열었다." }] });
+    const text = JSON.stringify({ polished_blocks: [{ block_id: "S000000", polished_text: "민재는 문을 열었다." }] });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), { status: 200 });
   };
 
@@ -135,7 +172,7 @@ test("semantic validator independently fails over on transient errors", async ()
     const url = String(request);
     urls.push(url);
     if (url.includes("gemini-3.7-flash")) return new Response("", { status: 429 });
-    const text = JSON.stringify({ preserved: true, violations: [], summary: "preserved" });
+    const text = JSON.stringify(acceptedValidation);
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), { status: 200 });
   };
 
@@ -143,6 +180,7 @@ test("semantic validator independently fails over on transient errors", async ()
     const provider = createGeminiProvider(fetchMock);
     const validation = await provider.validate(input.locked_text, input.locked_text, input.protected_manifest.terms);
     assert.equal(validation.preserved, true);
+    assert.equal(validation.rewrite_adequate, true);
     assert.equal(urls.length, 2);
     assert.equal(provider.validatorModel, "gemini-3.6-flash");
   } finally {

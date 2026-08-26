@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { sha256, validateDeterministic } from "../lib/preservation";
 
-test("surface edit with protected facts preserved passes deterministic validation", () => {
-  const original = "민재는 2026-08-25에 3층으로 올라갔다.\n\n\"문을 닫아.\"";
-  const candidate = "민재는 2026-08-25, 3층으로 올라갔다.\n\n\"문을 닫아.\"";
+test("substantial rewrite with changed paragraph boundaries passes when protected facts remain", () => {
+  const original = "민재는 2026-08-25에 3층으로 올라갔다.\n민재는 복도를 바라보았다.\n\n***\n\"문을 닫아.\"";
+  const candidate = "민재는 2026-08-25에 3층으로 올라가 복도를 바라보았다.\n***\n\"문을 닫아.\"";
   assert.deepEqual(validateDeterministic(original, candidate, ["민재"]), { passed: true, violations: [] });
 });
 
@@ -20,28 +20,28 @@ test("protected term deletion or mutation is rejected", () => {
   assert.ok(result.violations.some((value) => value.includes("protected term")));
 });
 
+test("redundant protected-term repetition may be reduced", () => {
+  const result = validateDeterministic(
+    "민재는 문을 열었다. 민재는 안으로 들어갔다.",
+    "민재는 문을 열고 안으로 들어갔다.",
+    ["민재"],
+  );
+  assert.deepEqual(result, { passed: true, violations: [] });
+});
+
 test("scene separator changes are rejected", () => {
   const result = validateDeterministic("첫 장면\n***\n둘째 장면", "첫 장면\n---\n둘째 장면", ["첫 장면"]);
   assert.equal(result.passed, false);
   assert.ok(result.violations.some((value) => value.startsWith("scene_order:")));
 });
 
-test("dialogue position changes are rejected", () => {
-  const result = validateDeterministic("서술.\n\"대사.\"", "\"대사.\"\n서술.", ["서술"]);
-  assert.equal(result.passed, false);
-  assert.ok(result.violations.some((value) => value.startsWith("dialogue_meaning:")));
+test("paragraph splitting inside one scene is allowed", () => {
+  const result = validateDeterministic("민재는 문을 열고 들어갔다.", "민재는 문을 열었다.\n\n안으로 들어갔다.", ["민재"]);
+  assert.deepEqual(result, { passed: true, violations: [] });
 });
 
-test("paragraph addition is rejected", () => {
-  const result = validateDeterministic("첫 줄.", "첫 줄.\n새 설정.", ["첫 줄"]);
-  assert.equal(result.passed, false);
-  assert.ok(result.violations.some((value) => value.startsWith("scene_order:")));
-});
-
-test("gross deletion is rejected", () => {
-  const original = "가".repeat(1000);
-  const candidate = "가".repeat(400);
-  const result = validateDeterministic(original, candidate, ["가"]);
+test("empty candidate is rejected", () => {
+  const result = validateDeterministic("민재가 있었다.", "   ", ["민재"]);
   assert.equal(result.passed, false);
   assert.ok(result.violations.some((value) => value.startsWith("deletion:")));
 });

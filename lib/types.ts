@@ -54,11 +54,15 @@ export interface SemanticValidation {
   preserved: boolean;
   violations: SemanticViolation[];
   summary: string;
+  rewrite_needed: boolean;
+  rewrite_adequate: boolean;
+  adequacy_summary: string;
 }
 
 export interface ValidationSummary {
   deterministic_passed: boolean;
   semantic_passed: boolean;
+  rewrite_adequacy_passed: boolean;
   violations: string[];
 }
 
