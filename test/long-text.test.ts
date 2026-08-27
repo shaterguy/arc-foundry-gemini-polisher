@@ -124,7 +124,11 @@ test("long upstream stalls are aborted before the host runtime ceiling", async (
     const signal = init?.signal;
     if (!signal) throw new Error("missing abort signal");
     return new Promise<Response>((_resolve, reject) => {
-      const abort = (): void => reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+      const keepAlive = setTimeout(() => reject(new Error("test_keepalive_expired")), 5_000);
+      const abort = (): void => {
+        clearTimeout(keepAlive);
+        reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+      };
       if (signal.aborted) abort();
       else signal.addEventListener("abort", abort, { once: true });
     });
