@@ -28,7 +28,7 @@ const acceptedValidation = {
   adequacy_summary: "already natural",
 };
 
-test("long interactive provider forces low thinking and bounded concurrency for rewrite and validation", async () => {
+test("long interactive provider forces low thinking and serial bounded units for rewrite and validation", async () => {
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
   const input: PolishInput = {
@@ -82,9 +82,10 @@ test("long interactive provider forces low thinking and bounded concurrency for 
 
     assert.ok(polishCalls >= 2);
     assert.ok(validationCalls >= 2);
-    assert.ok(maxInFlight >= 2);
-    assert.ok(maxInFlight <= 2);
-    assert.ok(maxTargetChars <= 6_000);
+    assert.ok(polishCalls <= 2);
+    assert.ok(validationCalls <= 2);
+    assert.equal(maxInFlight, 1);
+    assert.ok(maxTargetChars <= 8_000);
     assert.equal(candidate, input.locked_text);
     assert.equal(validation.preserved, true);
   } finally {
@@ -92,30 +93,83 @@ test("long interactive provider forces low thinking and bounded concurrency for 
   }
 });
 
-test("interactive Gemini policy backs off once for observed 429 and 503 responses", async () => {
-  for (const status of [429, 503]) {
-    let calls = 0;
-    const observedThinking: unknown[] = [];
-    const fetchMock = async (_request: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      calls += 1;
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
-        generationConfig?: { thinkingConfig?: { thinkingLevel?: string } };
-      };
-      observedThinking.push(body.generationConfig?.thinkingConfig?.thinkingLevel);
-      if (calls === 1) return new Response("transient", { status });
-      return new Response("ok", { status: 200 });
-    };
+test("interactive Gemini policy cools down a 429 without same-model retry and logs only sanitized quota metadata", async () => {
+  let calls = 0;
+  const observedThinking: unknown[] = [];
+  const warnings: string[] = [];
+  const oldWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
 
+  const fetchMock = async (_request: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      generationConfig?: { thinkingConfig?: { thinkingLevel?: string } };
+    };
+    observedThinking.push(body.generationConfig?.thinkingConfig?.thinkingLevel);
+    return new Response(JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        message: "project-number-should-never-be-logged",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            violations: [{
+              quotaMetric: "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count",
+              quotaId: "sensitive-quota-id-should-not-be-logged",
+            }],
+          },
+          {
+            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+            retryDelay: "0.01s",
+          },
+        ],
+      },
+    }), { status: 429, headers: { "content-type": "application/json" } });
+  };
+
+  try {
     const wrapped = withInteractiveGeminiPolicy(fetchMock);
-    const response = await wrapped("https://generativelanguage.googleapis.com/test", {
+    const response = await wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
       method: "POST",
       body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
     });
 
-    assert.equal(response.status, 200);
-    assert.equal(calls, 2);
-    assert.deepEqual(observedThinking, ["low", "low"]);
+    assert.equal(response.status, 429);
+    assert.equal(calls, 1);
+    assert.deepEqual(observedThinking, ["low"]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /gemini_rate_limit/u);
+    assert.match(warnings[0]!, /generate_content_paid_tier_input_token_count/u);
+    assert.doesNotMatch(warnings[0]!, /project-number-should-never-be-logged/u);
+    assert.doesNotMatch(warnings[0]!, /sensitive-quota-id-should-not-be-logged/u);
+  } finally {
+    console.warn = oldWarn;
   }
+});
+
+test("interactive Gemini policy retries one 503 on the same model", async () => {
+  let calls = 0;
+  const observedThinking: unknown[] = [];
+  const fetchMock = async (_request: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      generationConfig?: { thinkingConfig?: { thinkingLevel?: string } };
+    };
+    observedThinking.push(body.generationConfig?.thinkingConfig?.thinkingLevel);
+    if (calls === 1) return new Response("transient", { status: 503 });
+    return new Response("ok", { status: 200 });
+  };
+
+  const wrapped = withInteractiveGeminiPolicy(fetchMock);
+  const response = await wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
+    method: "POST",
+    body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
+  assert.deepEqual(observedThinking, ["low", "low"]);
 });
 
 test("short interactive provider keeps the default thinking policy", async () => {
