@@ -32,7 +32,7 @@ test("long interactive provider forces low thinking and bounded concurrency for 
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
   const input: PolishInput = {
-    locked_text: "민재는 복도를 걸었다. 창가에서 잠시 멈췄다. ".repeat(340),
+    locked_text: "민재는 복도를 걸었다. 창가에서 잠시 멈췄다. ".repeat(420),
     protected_manifest: { source: "arc-foundry-final-lock", terms: ["민재"] },
   };
   assert.ok(input.locked_text.length >= 8_000);
