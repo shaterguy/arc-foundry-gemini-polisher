@@ -1,5 +1,6 @@
 import { buildLockedLayout, reconstructCandidate } from "./blocks.js";
-import { createGeminiProvider, getMaxPolishAttempts, getRuntimeModels, type PolishProvider } from "./gemini.js";
+import { getMaxPolishAttempts, getRuntimeModels, type PolishProvider } from "./gemini.js";
+import { createInteractiveGeminiProvider } from "./interactive-gemini.js";
 import { sha256, validateDeterministic } from "./preservation.js";
 import { PROTECTED_MANIFEST_SOURCE, type PolishInput, type PolishResult } from "./types.js";
 
@@ -77,7 +78,7 @@ export async function polishLockedText(
   let activeProvider = provider;
   if (!activeProvider) {
     try {
-      activeProvider = createGeminiProvider();
+      activeProvider = createInteractiveGeminiProvider(input.locked_text.length);
     } catch {
       return fallback(input, "configuration_failure", runtimeModels.model, runtimeModels.validatorModel, 0, false, false, false, ["provider configuration unavailable"]);
     }
