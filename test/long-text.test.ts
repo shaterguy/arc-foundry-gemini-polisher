@@ -137,10 +137,10 @@ test("long upstream stalls are aborted before the host runtime ceiling", async (
       chunkConcurrency: 1,
       contextChars: 20,
       requestTimeoutMs: 15,
-      totalBudgetMs: 80,
+      totalBudgetMs: 1_200,
     });
     await assert.rejects(provider.polish(longInput, []), /provider_(?:request_timeout|timeout_budget)/u);
-    assert.ok(calls >= 1 && calls <= 4);
+    assert.equal(calls, 2);
   } finally {
     restoreEnv("GEMINI_API_KEY", oldKey);
   }
