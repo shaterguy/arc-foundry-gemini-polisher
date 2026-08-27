@@ -110,7 +110,7 @@ test("long manuscript uses bounded concurrent polish and semantic-validation uni
   }
 });
 
-test("long upstream stalls are aborted before the host runtime ceiling", async () => {
+test("long upstream stalls use a low-thinking fallback and abort before the interactive budget", async () => {
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
   const longInput: PolishInput = {
@@ -121,6 +121,12 @@ test("long upstream stalls are aborted before the host runtime ceiling", async (
 
   const hangingFetch = async (_request: string | URL | Request, init?: RequestInit): Promise<Response> => {
     calls += 1;
+    const body = JSON.parse(String(init?.body ?? "{}")) as {
+      generationConfig?: { thinkingConfig?: { thinkingLevel?: string } };
+    };
+    if (calls === 1) assert.equal(body.generationConfig?.thinkingConfig, undefined);
+    if (calls === 2) assert.equal(body.generationConfig?.thinkingConfig?.thinkingLevel, "low");
+
     const signal = init?.signal;
     if (!signal) throw new Error("missing abort signal");
     return new Promise<Response>((_resolve, reject) => {
