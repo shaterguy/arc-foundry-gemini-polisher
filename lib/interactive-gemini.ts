@@ -40,10 +40,13 @@ export function withLowThinking(fetchImpl: FetchLike = fetch): FetchLike {
   };
 }
 
-export function createInteractiveGeminiProvider(lockedTextLength: number): PolishProvider {
-  if (lockedTextLength < LONG_TEXT_THRESHOLD_CHARS) return createGeminiProvider();
+export function createInteractiveGeminiProvider(
+  lockedTextLength: number,
+  fetchImpl: FetchLike = fetch,
+): PolishProvider {
+  if (lockedTextLength < LONG_TEXT_THRESHOLD_CHARS) return createGeminiProvider(fetchImpl);
 
-  return createGeminiProvider(withLowThinking(), {
+  return createGeminiProvider(withLowThinking(fetchImpl), {
     longTextThresholdChars: LONG_TEXT_THRESHOLD_CHARS,
     requestTimeoutMs: LONG_REQUEST_TIMEOUT_MS,
     totalBudgetMs: LONG_TOTAL_BUDGET_MS,
