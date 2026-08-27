@@ -7,6 +7,7 @@ const DEFAULT_MODEL = "gemini-3.7-flash";
 const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 const MODEL_ID_RE = /^[A-Za-z0-9._-]{1,120}$/u;
+type ThinkingLevel = "low" | "medium" | "high";
 
 const POLISH_SYSTEM = `You are a Korean literary rewriter operating AFTER FINAL CONTENT LOCK.
 You have ZERO narrative authority but broad surface-expression authority inside each existing scene.
@@ -108,6 +109,7 @@ export interface GenerateContentRequestBody {
   generationConfig: {
     responseMimeType: "application/json";
     responseJsonSchema: unknown;
+    thinkingConfig?: { thinkingLevel: ThinkingLevel };
   };
   store: false;
 }
@@ -162,8 +164,8 @@ function normalizeOptions(options: GeminiProviderOptions): NormalizedProviderOpt
     chunkChars: boundedOption(options.chunkChars, 4_500, 40, 20_000),
     chunkConcurrency: boundedOption(options.chunkConcurrency, 3, 1, 6),
     contextChars: boundedOption(options.contextChars, 1_200, 0, 10_000),
-    requestTimeoutMs: boundedOption(options.requestTimeoutMs, 65_000, 10, 90_000),
-    totalBudgetMs: boundedOption(options.totalBudgetMs, 235_000, 50, 260_000),
+    requestTimeoutMs: boundedOption(options.requestTimeoutMs, 45_000, 10, 90_000),
+    totalBudgetMs: boundedOption(options.totalBudgetMs, 145_000, 50, 260_000),
   };
 }
 
@@ -230,6 +232,7 @@ export function buildGenerateContentRequest(
   systemInstruction: string,
   prompt: string,
   responseJsonSchema: unknown,
+  thinkingLevel?: ThinkingLevel,
 ): GenerateContentRequestBody {
   return {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -237,6 +240,7 @@ export function buildGenerateContentRequest(
     generationConfig: {
       responseMimeType: "application/json",
       responseJsonSchema,
+      ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
     },
     store: false,
   };
@@ -250,9 +254,10 @@ async function generateJson(
   apiKey: string,
   fetchImpl: FetchLike,
   timeoutMs?: number,
+  thinkingLevel?: ThinkingLevel,
 ): Promise<Record<string, unknown>> {
   const safeModel = validatedModel(model);
-  const body = buildGenerateContentRequest(systemInstruction, prompt, responseJsonSchema);
+  const body = buildGenerateContentRequest(systemInstruction, prompt, responseJsonSchema, thinkingLevel);
   const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
   let response: Response;
   try {
@@ -300,10 +305,11 @@ async function generateJsonWithFallback(
   selectModel: (model: string) => void,
   deadlineAt?: number,
   configuredTimeoutMs?: number,
+  fallbackThinkingLevel?: ThinkingLevel,
 ): Promise<Record<string, unknown>> {
   const primary = validatedModel(primaryModel);
   const fallback = validatedModel(fallbackModel);
-  const execute = (model: string): Promise<Record<string, unknown>> => callWithRetry(
+  const execute = (model: string, thinkingLevel?: ThinkingLevel): Promise<Record<string, unknown>> => callWithRetry(
     () => generateJson(
       model,
       systemInstruction,
@@ -312,6 +318,7 @@ async function generateJsonWithFallback(
       apiKey,
       fetchImpl,
       requestTimeout(deadlineAt, configuredTimeoutMs),
+      thinkingLevel,
     ),
     networkRetries,
     deadlineAt,
@@ -323,7 +330,7 @@ async function generateJsonWithFallback(
   } catch (error) {
     if (!isTransient(error) || fallback === primary) throw error;
     selectModel(fallback);
-    return execute(fallback);
+    return execute(fallback, fallbackThinkingLevel);
   }
 }
 
@@ -531,6 +538,7 @@ export function createGeminiProvider(
           (selected) => { selectedModel = selected; },
           deadlineAt,
           runtime.requestTimeoutMs,
+          "low",
         );
         const polished = parsePolishedBlocks(parsed);
         if (polished.length !== 1 || polished[0]?.block_id !== chunk.chunk_id) {
@@ -592,6 +600,7 @@ export function createGeminiProvider(
             (selected) => { selectedModel = selected; },
             deadlineAt,
             runtime.requestTimeoutMs,
+            "low",
           );
           return {
             chunk_id: unit.chunk_id,

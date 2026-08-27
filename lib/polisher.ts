@@ -52,6 +52,8 @@ function providerFailureCode(error: unknown): string {
     "provider_invalid_json",
     "provider_invalid_polish_payload",
     "provider_invalid_validation_payload",
+    "provider_request_timeout",
+    "provider_timeout_budget",
   ].includes(message)) return message;
   return "provider_error";
 }
