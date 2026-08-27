@@ -80,8 +80,8 @@ test("long interactive provider forces low thinking and bounded concurrency for 
     const candidate = reconstructCandidate(layout, polished);
     const validation = await provider.validate(input.locked_text, candidate, ["민재"], "자연스러운 한국어");
 
-    assert.ok(polishCalls > 1);
-    assert.ok(validationCalls > 1);
+    assert.ok(polishCalls >= 2);
+    assert.ok(validationCalls >= 2);
     assert.ok(maxInFlight >= 2);
     assert.ok(maxInFlight <= 2);
     assert.ok(maxTargetChars <= 6_000);
