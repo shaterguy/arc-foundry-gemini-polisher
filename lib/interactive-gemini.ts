@@ -3,13 +3,14 @@ import { createGeminiProvider, type PolishProvider } from "./gemini.js";
 const LONG_TEXT_THRESHOLD_CHARS = 8_000;
 const LONG_CHUNK_CHARS = 20_000;
 const LONG_CHUNK_CONCURRENCY = 1;
-const LONG_REQUEST_TIMEOUT_MS = 60_000;
-const LONG_TOTAL_BUDGET_MS = 120_000;
-const OVERLOAD_RETRY_ATTEMPTS = 1;
-const OVERLOAD_RETRY_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_RETRY_ATTEMPTS = 1;
 const RATE_LIMIT_RETRY_DEFAULT_DELAY_MS = 2_000;
 const RATE_LIMIT_RETRY_DELAY_MAX_MS = 30_000;
+const RATE_LIMIT_RETRY_RESPONSE_RESERVE_MS = 60_000;
+const LONG_REQUEST_TIMEOUT_MS = RATE_LIMIT_RETRY_DELAY_MAX_MS + RATE_LIMIT_RETRY_RESPONSE_RESERVE_MS;
+const LONG_TOTAL_BUDGET_MS = 220_000;
+const OVERLOAD_RETRY_ATTEMPTS = 1;
+const OVERLOAD_RETRY_BASE_DELAY_MS = 1_000;
 const TRANSIENT_RETRY_JITTER_MS = 250;
 const FREE_TIER_REQUEST_QUOTA_METRIC = "generativelanguage.googleapis.com/generate_content_free_tier_requests";
 
@@ -112,8 +113,11 @@ async function readRateLimitMetadata(response: Response): Promise<RateLimitMetad
 
 function rateLimitRetryDelayMs(metadata: RateLimitMetadata): number {
   const suggested = metadata.retryDelayMs ?? RATE_LIMIT_RETRY_DEFAULT_DELAY_MS;
-  return Math.min(RATE_LIMIT_RETRY_DELAY_MAX_MS, Math.max(0, suggested))
-    + Math.floor(Math.random() * TRANSIENT_RETRY_JITTER_MS);
+  const bounded = Math.min(RATE_LIMIT_RETRY_DELAY_MAX_MS, Math.max(0, suggested));
+  return Math.min(
+    RATE_LIMIT_RETRY_DELAY_MAX_MS,
+    bounded + Math.floor(Math.random() * TRANSIENT_RETRY_JITTER_MS),
+  );
 }
 
 function isSharedFreeTierRequestQuota(metadata: RateLimitMetadata): boolean {
@@ -139,9 +143,12 @@ function logRateLimit(input: string | URL | Request, metadata: RateLimitMetadata
  * Long-form MCP calls are latency-sensitive and may encounter provider
  * capacity/rate errors. Keep long rewrite/validation on low thinking, minimize
  * request units, serialize chunk traffic, and honor one provider RetryInfo wait
- * on the same model for 429. If the shared project free-tier request quota is
- * still exhausted after that retry, fail closed instead of spending another
- * request on the alternate model. A 503 keeps one bounded same-model retry.
+ * on the same model for 429. The upstream AbortSignal covers the whole fetch
+ * wrapper retry loop, so the request envelope reserves a full 60 seconds after
+ * the bounded 30-second RetryInfo wait. If the shared project free-tier request
+ * quota is still exhausted after that retry, fail closed instead of spending
+ * another request on the alternate model. A 503 keeps one bounded same-model
+ * retry.
  */
 export function withInteractiveGeminiPolicy(fetchImpl: FetchLike = fetch): FetchLike {
   return async (input, init) => {
