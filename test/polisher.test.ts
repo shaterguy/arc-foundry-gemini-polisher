@@ -191,8 +191,12 @@ test("provider failure falls back to exact locked source with sanitized status",
   assert.deepEqual(result.validation.violations, ["Gemini polish request failed: gemini_http_503"]);
 });
 
-for (const code of ["provider_request_timeout", "provider_timeout_budget"]) {
-  test(`bounded timeout failure keeps the diagnostic code: ${code}`, async () => {
+for (const code of [
+  "provider_request_timeout",
+  "provider_timeout_budget",
+  "provider_project_request_quota_exhausted",
+]) {
+  test(`bounded provider failure keeps the diagnostic code: ${code}`, async () => {
     const mock = provider({
       async polish() {
         throw new Error(code);
