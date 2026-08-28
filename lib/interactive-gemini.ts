@@ -15,10 +15,14 @@ const TRANSIENT_RETRY_JITTER_MS = 250;
 const FREE_TIER_REQUEST_QUOTA_METRIC = "generativelanguage.googleapis.com/generate_content_free_tier_requests";
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+type QuotaScope = "per_model" | "project_shared" | "unknown";
+type QuotaWindow = "daily" | "minute" | "second" | "unknown";
 
 interface RateLimitMetadata {
   apiStatus: string;
   quotaMetric?: string;
+  quotaScope?: QuotaScope;
+  quotaWindow?: QuotaWindow;
   retryDelayMs?: number;
 }
 
@@ -79,6 +83,31 @@ function modelFromInput(input: string | URL | Request): string {
   return match?.[1] ?? "unknown";
 }
 
+function quotaClassificationFromId(value: unknown): { scope?: QuotaScope; window?: QuotaWindow } {
+  const quotaId = safeDiagnosticToken(value);
+  if (!quotaId) return {};
+  const normalized = quotaId.toLowerCase();
+  const scope: QuotaScope | undefined = normalized.includes("permodel")
+    ? "per_model"
+    : normalized.includes("perproject")
+      ? "project_shared"
+      : "unknown";
+  const window: QuotaWindow | undefined = normalized.includes("perday")
+    ? "daily"
+    : normalized.includes("perminute")
+      ? "minute"
+      : normalized.includes("persecond")
+        ? "second"
+        : "unknown";
+  return { scope, window };
+}
+
+function mergeQuotaClass<T extends string>(current: T | undefined, next: T | undefined, unknown: T): T | undefined {
+  if (next === undefined) return current;
+  if (current === undefined) return next;
+  return current === next ? current : unknown;
+}
+
 async function readRateLimitMetadata(response: Response): Promise<RateLimitMetadata> {
   const metadata: RateLimitMetadata = { apiStatus: "RESOURCE_EXHAUSTED" };
   try {
@@ -99,6 +128,9 @@ async function readRateLimitMetadata(response: Response): Promise<RateLimitMetad
       if (detailType?.endsWith("google.rpc.QuotaFailure") && Array.isArray(detail.violations)) {
         for (const violation of detail.violations as Array<Record<string, unknown>>) {
           metadata.quotaMetric ??= safeDiagnosticToken(violation.quotaMetric);
+          const classification = quotaClassificationFromId(violation.quotaId);
+          metadata.quotaScope = mergeQuotaClass(metadata.quotaScope, classification.scope, "unknown");
+          metadata.quotaWindow = mergeQuotaClass(metadata.quotaWindow, classification.window, "unknown");
         }
       }
       if (detailType?.endsWith("google.rpc.RetryInfo")) {
@@ -120,8 +152,9 @@ function rateLimitRetryDelayMs(metadata: RateLimitMetadata): number {
   );
 }
 
-function isSharedFreeTierRequestQuota(metadata: RateLimitMetadata): boolean {
-  return metadata.quotaMetric === FREE_TIER_REQUEST_QUOTA_METRIC;
+function isProjectSharedFreeTierRequestQuota(metadata: RateLimitMetadata): boolean {
+  return metadata.quotaMetric === FREE_TIER_REQUEST_QUOTA_METRIC
+    && metadata.quotaScope === "project_shared";
 }
 
 function projectRequestQuotaError(): Error {
@@ -135,6 +168,8 @@ function logRateLimit(input: string | URL | Request, metadata: RateLimitMetadata
     httpStatus: 429,
     apiStatus: metadata.apiStatus,
     ...(metadata.quotaMetric ? { quotaMetric: metadata.quotaMetric } : {}),
+    ...(metadata.quotaScope ? { quotaScope: metadata.quotaScope } : {}),
+    ...(metadata.quotaWindow ? { quotaWindow: metadata.quotaWindow } : {}),
     ...(metadata.retryDelayMs !== undefined ? { retryDelayMs: metadata.retryDelayMs } : {}),
   }));
 }
@@ -143,12 +178,12 @@ function logRateLimit(input: string | URL | Request, metadata: RateLimitMetadata
  * Long-form MCP calls are latency-sensitive and may encounter provider
  * capacity/rate errors. Keep long rewrite/validation on low thinking, minimize
  * request units, serialize chunk traffic, and honor one provider RetryInfo wait
- * on the same model for 429. The upstream AbortSignal covers the whole fetch
- * wrapper retry loop, so the request envelope reserves a full 60 seconds after
- * the bounded 30-second RetryInfo wait. If the shared project free-tier request
- * quota is still exhausted after that retry, fail closed instead of spending
- * another request on the alternate model. A 503 keeps one bounded same-model
- * retry.
+ * on the same model for retryable 429s. QuotaFailure quotaId is never logged;
+ * only fixed scope/window classifications are retained. Daily quota cannot
+ * recover inside this invocation, so a model-scoped daily quota falls through
+ * immediately to the existing alternate-model path. Alternate-model traffic is
+ * suppressed only when provider metadata explicitly identifies a project-wide
+ * free-tier request quota. A 503 keeps one bounded same-model retry.
  */
 export function withInteractiveGeminiPolicy(fetchImpl: FetchLike = fetch): FetchLike {
   return async (input, init) => {
@@ -183,13 +218,23 @@ export function withInteractiveGeminiPolicy(fetchImpl: FetchLike = fetch): Fetch
       if (response.status === 429) {
         const metadata = await readRateLimitMetadata(response);
         logRateLimit(input, metadata);
-        if (rateLimitRetries >= RATE_LIMIT_RETRY_ATTEMPTS) {
-          if (isSharedFreeTierRequestQuota(metadata)) {
+
+        if (metadata.quotaWindow === "daily") {
+          if (isProjectSharedFreeTierRequestQuota(metadata)) {
             await cancelResponseBody(response);
             throw projectRequestQuotaError();
           }
           return response;
         }
+
+        if (rateLimitRetries >= RATE_LIMIT_RETRY_ATTEMPTS) {
+          if (isProjectSharedFreeTierRequestQuota(metadata)) {
+            await cancelResponseBody(response);
+            throw projectRequestQuotaError();
+          }
+          return response;
+        }
+
         rateLimitRetries += 1;
         await cancelResponseBody(response);
         await waitForRetry(rateLimitRetryDelayMs(metadata), adjustedInit?.signal);
