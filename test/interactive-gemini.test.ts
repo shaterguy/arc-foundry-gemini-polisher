@@ -19,6 +19,29 @@ function promptPayload(init?: RequestInit): Record<string, unknown> {
   return JSON.parse(prompt.slice(newline + 1)) as Record<string, unknown>;
 }
 
+function freeTierRequestQuotaResponse(retryDelay = "0.01s"): Response {
+  return new Response(JSON.stringify({
+    error: {
+      code: 429,
+      status: "RESOURCE_EXHAUSTED",
+      message: "project-number-should-never-be-logged",
+      details: [
+        {
+          "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+          violations: [{
+            quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+            quotaId: "sensitive-quota-id-should-not-be-logged",
+          }],
+        },
+        {
+          "@type": "type.googleapis.com/google.rpc.RetryInfo",
+          retryDelay,
+        },
+      ],
+    },
+  }), { status: 429, headers: { "content-type": "application/json" } });
+}
+
 const acceptedValidation = {
   preserved: true,
   violations: [],
@@ -28,15 +51,15 @@ const acceptedValidation = {
   adequacy_summary: "already natural",
 };
 
-test("long interactive provider forces low thinking and serial bounded units for rewrite and validation", async () => {
+test("long interactive provider keeps a 13k-class lock to one serial rewrite and validation unit", async () => {
   const oldKey = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
   const input: PolishInput = {
-    locked_text: "민재는 복도를 걸었다. 창가에서 잠시 멈췄다. ".repeat(340),
+    locked_text: "민재는 복도를 걸었다. 창가에서 잠시 멈췄다. ".repeat(520),
     protected_manifest: { source: "arc-foundry-final-lock", terms: ["민재"] },
   };
-  assert.ok(input.locked_text.length >= 8_000);
-  assert.ok(input.locked_text.length <= 12_000);
+  assert.ok(input.locked_text.length >= 13_000);
+  assert.ok(input.locked_text.length <= 16_000);
 
   let polishCalls = 0;
   let validationCalls = 0;
@@ -80,12 +103,10 @@ test("long interactive provider forces low thinking and serial bounded units for
     const candidate = reconstructCandidate(layout, polished);
     const validation = await provider.validate(input.locked_text, candidate, ["민재"], "자연스러운 한국어");
 
-    assert.ok(polishCalls >= 2);
-    assert.ok(validationCalls >= 2);
-    assert.ok(polishCalls <= 2);
-    assert.ok(validationCalls <= 2);
+    assert.equal(polishCalls, 1);
+    assert.equal(validationCalls, 1);
     assert.equal(maxInFlight, 1);
-    assert.ok(maxTargetChars <= 8_000);
+    assert.ok(maxTargetChars <= 20_000);
     assert.equal(candidate, input.locked_text);
     assert.equal(validation.preserved, true);
   } finally {
@@ -93,7 +114,7 @@ test("long interactive provider forces low thinking and serial bounded units for
   }
 });
 
-test("interactive Gemini policy cools down a 429 without same-model retry and logs only sanitized quota metadata", async () => {
+test("interactive Gemini policy honors RetryInfo and retries one 429 on the same model", async () => {
   let calls = 0;
   const observedThinking: unknown[] = [];
   const warnings: string[] = [];
@@ -106,26 +127,8 @@ test("interactive Gemini policy cools down a 429 without same-model retry and lo
       generationConfig?: { thinkingConfig?: { thinkingLevel?: string } };
     };
     observedThinking.push(body.generationConfig?.thinkingConfig?.thinkingLevel);
-    return new Response(JSON.stringify({
-      error: {
-        code: 429,
-        status: "RESOURCE_EXHAUSTED",
-        message: "project-number-should-never-be-logged",
-        details: [
-          {
-            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
-            violations: [{
-              quotaMetric: "generativelanguage.googleapis.com/generate_content_paid_tier_input_token_count",
-              quotaId: "sensitive-quota-id-should-not-be-logged",
-            }],
-          },
-          {
-            "@type": "type.googleapis.com/google.rpc.RetryInfo",
-            retryDelay: "0.01s",
-          },
-        ],
-      },
-    }), { status: 429, headers: { "content-type": "application/json" } });
+    if (calls === 1) return freeTierRequestQuotaResponse();
+    return new Response("ok", { status: 200 });
   };
 
   try {
@@ -135,16 +138,81 @@ test("interactive Gemini policy cools down a 429 without same-model retry and lo
       body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
     });
 
-    assert.equal(response.status, 429);
-    assert.equal(calls, 1);
-    assert.deepEqual(observedThinking, ["low"]);
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+    assert.deepEqual(observedThinking, ["low", "low"]);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /gemini_rate_limit/u);
-    assert.match(warnings[0]!, /generate_content_paid_tier_input_token_count/u);
+    assert.match(warnings[0]!, /generate_content_free_tier_requests/u);
     assert.doesNotMatch(warnings[0]!, /project-number-should-never-be-logged/u);
     assert.doesNotMatch(warnings[0]!, /sensitive-quota-id-should-not-be-logged/u);
   } finally {
     console.warn = oldWarn;
+  }
+});
+
+test("interactive Gemini policy fails closed after one RetryInfo retry when shared free-tier request quota remains exhausted", async () => {
+  let calls = 0;
+  const warnings: string[] = [];
+  const oldWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+
+  const fetchMock = async (): Promise<Response> => {
+    calls += 1;
+    return freeTierRequestQuotaResponse();
+  };
+
+  try {
+    const wrapped = withInteractiveGeminiPolicy(fetchMock);
+    await assert.rejects(
+      wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
+        method: "POST",
+        body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
+      }),
+      /provider_project_request_quota_exhausted/u,
+    );
+    assert.equal(calls, 2);
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every((warning) => warning.includes("generate_content_free_tier_requests")));
+    assert.ok(warnings.every((warning) => !warning.includes("project-number-should-never-be-logged")));
+    assert.ok(warnings.every((warning) => !warning.includes("sensitive-quota-id-should-not-be-logged")));
+  } finally {
+    console.warn = oldWarn;
+  }
+});
+
+test("long interactive provider does not spend an alternate-model request on persistent shared free-tier quota", async () => {
+  const oldKey = process.env.GEMINI_API_KEY;
+  const oldModel = process.env.GEMINI_MODEL;
+  const oldFallback = process.env.GEMINI_FALLBACK_MODEL;
+  process.env.GEMINI_API_KEY = "unit-test-key-not-a-secret";
+  process.env.GEMINI_MODEL = "gemini-3.7-flash";
+  process.env.GEMINI_FALLBACK_MODEL = "gemini-3.6-flash";
+  const input: PolishInput = {
+    locked_text: "민재는 복도를 걸었다. 창가에서 잠시 멈췄다. ".repeat(520),
+    protected_manifest: { source: "arc-foundry-final-lock", terms: ["민재"] },
+  };
+  const requestedModels: string[] = [];
+  const oldWarn = console.warn;
+  console.warn = () => {};
+
+  const fetchMock = async (request: string | URL | Request): Promise<Response> => {
+    const url = typeof request === "string" ? request : request instanceof URL ? request.toString() : request.url;
+    const match = url.match(/\/models\/([^/:]+):generateContent/u);
+    requestedModels.push(match?.[1] ?? "unknown");
+    return freeTierRequestQuotaResponse();
+  };
+
+  try {
+    const provider = createInteractiveGeminiProvider(input.locked_text.length, fetchMock);
+    await assert.rejects(provider.polish(input, []), /provider_project_request_quota_exhausted/u);
+    assert.deepEqual(requestedModels, ["gemini-3.7-flash", "gemini-3.7-flash"]);
+    assert.equal(provider.model, "gemini-3.7-flash");
+  } finally {
+    console.warn = oldWarn;
+    restoreEnv("GEMINI_API_KEY", oldKey);
+    restoreEnv("GEMINI_MODEL", oldModel);
+    restoreEnv("GEMINI_FALLBACK_MODEL", oldFallback);
   }
 });
 
