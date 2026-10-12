@@ -9,6 +9,7 @@ on:
       - v0.1.0-dev4
       - v0.1.0-dev5
       - v0.1.0-dev7
+      - 'ci-fallback/**'
   pull_request:
 
   workflow_dispatch:
@@ -17,6 +18,8 @@ permissions:
 
 jobs:
   verify:
+    if: >-
+      (github.event_name != 'push' || contains(github.event.head_commit.message, '[gh-fallback:ci.yml]'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
