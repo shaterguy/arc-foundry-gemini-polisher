@@ -1,16 +1,9 @@
 name: ci
 
 on:
-  push:
-    branches:
-      - v0.1.0-dev1
-      - v0.1.0-dev2
-      - v0.1.0-dev3
-      - v0.1.0-dev4
-      - v0.1.0-dev5
-      - v0.1.0-dev7
   pull_request:
 
+  workflow_dispatch:
 permissions:
   contents: read
 
