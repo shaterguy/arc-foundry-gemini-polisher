@@ -19,7 +19,10 @@ function promptPayload(init?: RequestInit): Record<string, unknown> {
   return JSON.parse(prompt.slice(newline + 1)) as Record<string, unknown>;
 }
 
-function freeTierRequestQuotaResponse(retryDelay = "0.01s"): Response {
+function freeTierRequestQuotaResponse(
+  retryDelay = "0.01s",
+  quotaId = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+): Response {
   return new Response(JSON.stringify({
     error: {
       code: 429,
@@ -30,7 +33,7 @@ function freeTierRequestQuotaResponse(retryDelay = "0.01s"): Response {
           "@type": "type.googleapis.com/google.rpc.QuotaFailure",
           violations: [{
             quotaMetric: "generativelanguage.googleapis.com/generate_content_free_tier_requests",
-            quotaId: "sensitive-quota-id-should-not-be-logged",
+            quotaId,
           }],
         },
         {
@@ -114,7 +117,7 @@ test("long interactive provider keeps a 13k-class lock to one serial rewrite and
   }
 });
 
-test("interactive Gemini policy honors RetryInfo and retries one 429 on the same model", async () => {
+test("interactive Gemini policy honors RetryInfo for retryable model-scoped 429", async () => {
   let calls = 0;
   const observedThinking: unknown[] = [];
   const warnings: string[] = [];
@@ -144,14 +147,16 @@ test("interactive Gemini policy honors RetryInfo and retries one 429 on the same
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /gemini_rate_limit/u);
     assert.match(warnings[0]!, /generate_content_free_tier_requests/u);
+    assert.match(warnings[0]!, /"quotaScope":"per_model"/u);
+    assert.match(warnings[0]!, /"quotaWindow":"minute"/u);
+    assert.doesNotMatch(warnings[0]!, /GenerateRequestsPerMinutePerProjectPerModel-FreeTier/u);
     assert.doesNotMatch(warnings[0]!, /project-number-should-never-be-logged/u);
-    assert.doesNotMatch(warnings[0]!, /sensitive-quota-id-should-not-be-logged/u);
   } finally {
     console.warn = oldWarn;
   }
 });
 
-test("interactive Gemini policy fails closed after one RetryInfo retry when shared free-tier request quota remains exhausted", async () => {
+test("interactive Gemini policy returns persistent model-scoped 429 after one same-model retry so caller can fail over", async () => {
   let calls = 0;
   const warnings: string[] = [];
   const oldWarn = console.warn;
@@ -164,24 +169,20 @@ test("interactive Gemini policy fails closed after one RetryInfo retry when shar
 
   try {
     const wrapped = withInteractiveGeminiPolicy(fetchMock);
-    await assert.rejects(
-      wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
-        method: "POST",
-        body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
-      }),
-      /provider_project_request_quota_exhausted/u,
-    );
+    const response = await wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
+      method: "POST",
+      body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
+    });
+    assert.equal(response.status, 429);
     assert.equal(calls, 2);
     assert.equal(warnings.length, 2);
-    assert.ok(warnings.every((warning) => warning.includes("generate_content_free_tier_requests")));
-    assert.ok(warnings.every((warning) => !warning.includes("project-number-should-never-be-logged")));
-    assert.ok(warnings.every((warning) => !warning.includes("sensitive-quota-id-should-not-be-logged")));
+    assert.ok(warnings.every((warning) => warning.includes("\"quotaScope\":\"per_model\"")));
   } finally {
     console.warn = oldWarn;
   }
 });
 
-test("long interactive provider does not spend an alternate-model request on persistent shared free-tier quota", async () => {
+test("long interactive provider immediately falls back to alternate model on model-scoped daily quota", async () => {
   const oldKey = process.env.GEMINI_API_KEY;
   const oldModel = process.env.GEMINI_MODEL;
   const oldFallback = process.env.GEMINI_FALLBACK_MODEL;
@@ -196,23 +197,63 @@ test("long interactive provider does not spend an alternate-model request on per
   const oldWarn = console.warn;
   console.warn = () => {};
 
-  const fetchMock = async (request: string | URL | Request): Promise<Response> => {
+  const fetchMock = async (request: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof request === "string" ? request : request instanceof URL ? request.toString() : request.url;
     const match = url.match(/\/models\/([^/:]+):generateContent/u);
-    requestedModels.push(match?.[1] ?? "unknown");
-    return freeTierRequestQuotaResponse();
+    const model = match?.[1] ?? "unknown";
+    requestedModels.push(model);
+    if (model === "gemini-3.7-flash") {
+      return freeTierRequestQuotaResponse("0s", "GenerateRequestsPerDayPerProjectPerModel-FreeTier");
+    }
+    const payload = promptPayload(init);
+    const blocks = payload.EDIT_TARGET_BLOCKS as Array<{ block_id: string; source_text: string }>;
+    const text = JSON.stringify({
+      polished_blocks: blocks.map((block) => ({ block_id: block.block_id, polished_text: block.source_text })),
+    });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] }), { status: 200 });
   };
 
   try {
     const provider = createInteractiveGeminiProvider(input.locked_text.length, fetchMock);
-    await assert.rejects(provider.polish(input, []), /provider_project_request_quota_exhausted/u);
-    assert.deepEqual(requestedModels, ["gemini-3.7-flash", "gemini-3.7-flash"]);
-    assert.equal(provider.model, "gemini-3.7-flash");
+    const polished = await provider.polish(input, []);
+    assert.equal(polished.length, 1);
+    assert.deepEqual(requestedModels, ["gemini-3.7-flash", "gemini-3.6-flash"]);
+    assert.equal(provider.model, "gemini-3.6-flash");
   } finally {
     console.warn = oldWarn;
     restoreEnv("GEMINI_API_KEY", oldKey);
     restoreEnv("GEMINI_MODEL", oldModel);
     restoreEnv("GEMINI_FALLBACK_MODEL", oldFallback);
+  }
+});
+
+test("interactive Gemini policy fails closed without retry for explicit project-shared daily quota", async () => {
+  let calls = 0;
+  const warnings: string[] = [];
+  const oldWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+
+  const fetchMock = async (): Promise<Response> => {
+    calls += 1;
+    return freeTierRequestQuotaResponse("0s", "GenerateRequestsPerDayPerProject-FreeTier");
+  };
+
+  try {
+    const wrapped = withInteractiveGeminiPolicy(fetchMock);
+    await assert.rejects(
+      wrapped("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent", {
+        method: "POST",
+        body: JSON.stringify({ generationConfig: { responseMimeType: "application/json" } }),
+      }),
+      /provider_project_request_quota_exhausted/u,
+    );
+    assert.equal(calls, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"quotaScope":"project_shared"/u);
+    assert.match(warnings[0]!, /"quotaWindow":"daily"/u);
+    assert.doesNotMatch(warnings[0]!, /GenerateRequestsPerDayPerProject-FreeTier/u);
+  } finally {
+    console.warn = oldWarn;
   }
 });
 

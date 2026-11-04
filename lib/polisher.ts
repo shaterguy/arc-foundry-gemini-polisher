@@ -55,6 +55,7 @@ function providerFailureCode(error: unknown): string {
     "provider_invalid_validation_payload",
     "provider_request_timeout",
     "provider_timeout_budget",
+    "provider_project_request_quota_exhausted",
   ].includes(message)) return message;
   return "provider_error";
 }
